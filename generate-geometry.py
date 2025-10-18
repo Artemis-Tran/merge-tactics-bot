@@ -125,6 +125,54 @@ def detect_mana_roi(hsv):
     return {"x": 0.86, "y": 0.90, "w": 0.10, "h": 0.07}
 
 
+def compute_bench_slots(playable_rect_px, hand_boxes_norm, W, H, n_slots=5, bench_width_factor=0.84):
+    """
+    Build n_slots contiguous bench rectangles between the bottom of the playable board and the top of the hand.
+    The bench is left-aligned to the playable board's left edge but only uses a fraction of its width.
+      - bench_width_factor: fraction of playable width to occupy (0<factor<=1), e.g. 0.86
+      - left-most slot aligns to playable left; remaining width becomes a right margin.
+    """
+    bx, by, bw, bh = playable_rect_px
+    board_bottom = by + bh
+
+    if not hand_boxes_norm:
+        return []
+
+    # Hand top (from first hand box)
+    hb = hand_boxes_norm[0]
+    hand_top_px = int(hb["cy"] * H - (hb["h"] * H) / 2)
+
+    # Vertical band between board bottom and hand top (with a small pad)
+    pad = int(0.02 * H)
+    y0 = board_bottom + pad
+    y1 = hand_top_px - pad
+    if y1 <= y0:
+        band_h = int(0.08 * H)
+        y0 = board_bottom + pad
+        y1 = y0 + band_h
+    band_h = y1 - y0 - 20
+
+    # Bench width is a fraction of the playable width, anchored to the left
+    bench_w = int(bw * bench_width_factor)
+    bench_x0 = bx  # left-aligned
+    # right margin exists implicitly: (bx + bw) - (bench_x0 + bench_w)
+
+    # Make contiguous slot widths that sum exactly to bench_w
+    base_w = bench_w // n_slots
+    remainder = bench_w % n_slots  # distribute leftover 1px across first 'remainder' slots
+
+    slots = []
+    x_cursor = bench_x0
+    for i in range(n_slots):
+        w_i = base_w + (1 if i < remainder else 0)
+        slots.append(to_norm_rect(x_cursor, y0, w_i, band_h, W, H))
+        x_cursor += w_i
+
+    return slots
+    
+    
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--img", type=Path, default=Path("screenshots/beginning-board.png"))
@@ -180,12 +228,15 @@ def main():
 
     mana_roi = detect_mana_roi(hsv)
 
+    bench_slots = compute_bench_slots(playable_rect, hand, W, H, n_slots=5)
+
     geometry = {
         "image_basis": str(args.img.name),
         "resolution_px": [W, H],
         "board_rect_full": full_norm,
         "board_rect_playable": playable_norm,
         "board": {"rows": args.rows, "cols": args.cols, "tiles": tiles},
+        "bench": {"slots": bench_slots},
         "hand": hand,
         "mana_roi": mana_roi,
     }
@@ -212,6 +263,11 @@ def main():
         cv2.circle(overlay, (cx, cy), 5, (255, 0, 0), -1)
         cv2.putText(overlay, f"{i}", (cx - 8, cy - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+    # draw bench slots
+    for i, s in enumerate(bench_slots):
+        sx, sy, sw, sh = to_abs_rect(s, W, H)
+        draw_labeled_rect(overlay, (sx, sy, sw, sh), (255, 0, 255), f"B{i+1}")
 
     # draw hand boxes and cost sub-ROIs
     for i, hbox in enumerate(hand):
