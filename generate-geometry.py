@@ -100,9 +100,9 @@ def rel_child_abs_norm(parent_center_norm, parent_size_norm, child_rel):
     p_x = pcx - pw / 2.0
     p_y = pcy - ph / 2.0
     ax = p_x + child_rel["x"] * pw
-    ay = p_y + child_rel["y"] * ph
+    ay = p_y + child_rel["y"] * ph + 0.005
     aw = child_rel["w"] * pw
-    ah = child_rel["h"] * ph
+    ah = child_rel["h"] * ph - 0.016
     return {"x": ax, "y": ay, "w": aw, "h": ah}
 
 
@@ -117,10 +117,10 @@ def detect_mana_roi(hsv):
         c = max(cnts, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(c)
         return {
-            "x": (int(0.65 * W) + x) / W,
-            "y": (int(0.82 * H) + y) / H,
-            "w": w / W,
-            "h": h / H,
+            "x": (int(0.66 * W) + x) / W,
+            "y": (int(0.825 * H) + y) / H,
+            "w": w / W - 0.02,
+            "h": h / H - 0.01,
         }
     return {"x": 0.86, "y": 0.90, "w": 0.10, "h": 0.07}
 
