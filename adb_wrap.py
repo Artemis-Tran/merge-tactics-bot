@@ -12,7 +12,6 @@ def adb_cmd(*args):
     return base + [str(a) for a in args]
 
 def adb_screenshot(out_path):
-    # allow str path or Path
     with open(out_path, "wb") as f:
         subprocess.run(adb_cmd("exec-out", "screencap", "-p"), stdout=f, check=True)
 
