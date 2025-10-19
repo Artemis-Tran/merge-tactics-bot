@@ -27,14 +27,10 @@ if __name__ == "__main__":
     print("[TEST] ADB BIN:", ADB_BIN)
     subprocess.check_call([str(ADB_BIN), "version"])
 
-    print("[TEST] Taking screenshot…")
-    adb_screenshot(Path("latest.png"))
-    print("[OK] Saved latest.png")
-
     print("[TEST] Tapping center…")
     adb_tap(360, 640)
     print("[OK] Tap sent")
 
-    print("[TEST] Swiping down…")
-    adb_swipe(360, 400, 360, 800, 300)
+    print("[TEST] Swiping up…")
+    adb_swipe(360, 400, 360, 200, 500)
     print("[OK] Swipe sent")
