@@ -117,9 +117,9 @@ def detect_mana_roi(hsv):
         c = max(cnts, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(c)
         return {
-            "x": (int(0.66 * W) + x) / W,
+            "x": (int(0.65 * W) + x) / W,
             "y": (int(0.825 * H) + y) / H,
-            "w": w / W - 0.02,
+            "w": w / W,
             "h": h / H - 0.01,
         }
     return {"x": 0.86, "y": 0.90, "w": 0.10, "h": 0.07}
