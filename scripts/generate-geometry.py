@@ -175,7 +175,7 @@ def compute_bench_slots(playable_rect_px, hand_boxes_norm, W, H, n_slots=5, benc
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--img", type=Path, default=Path("screenshots/beginning-board.png"))
+    parser.add_argument("--img", type=Path, default=Path("assets/screenshots/beginning-board.png"))
     parser.add_argument("--rows", type=int, default=4)
     parser.add_argument("--cols", type=int, default=5)
     parser.add_argument("--out_dir", type=Path, default=Path("../screenshots"))
