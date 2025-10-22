@@ -49,14 +49,14 @@ def find_board_rect(bgr):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
-        x, y, w, h = int(0.18 * W), int(0.25 * H), int(0.64 * W), int(0.55 * H)
+        x, y, w, h = int(0.18 * W), int(0.25 * H), int(0.64 * W), int(0.64 * H)
     else:
         c = max(cnts, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(c)
     x_in = x + int(0.03 * w)
     y_in = y + int(0.04 * h)
     w_in = w - int(0.06 * w)
-    h_in = h - int(0.08 * h)
+    h_in = h - int(0.14 * h)
     return (x_in, y_in, w_in, h_in), hsv
 
 
@@ -175,10 +175,10 @@ def compute_bench_slots(playable_rect_px, hand_boxes_norm, W, H, n_slots=5, benc
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--img", type=Path, default=Path("assets/screenshots/beginning-board.png"))
+    parser.add_argument("--img", type=Path, default=Path("../assets/screenshots/upgrade.png"))
     parser.add_argument("--rows", type=int, default=4)
     parser.add_argument("--cols", type=int, default=5)
-    parser.add_argument("--out_dir", type=Path, default=Path("../screenshots"))
+    parser.add_argument("--out_dir", type=Path, default=Path("../assets/screenshots"))
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -210,10 +210,16 @@ def main():
     hand_y = 0.92
     hand_w, hand_h = 0.15, 0.12
 
+    round_phase_roi = {"x": 0.02, "y": 0.11, "w": 0.20, "h": 0.05}
+
+    health_roi = {"x": 0.835, "y": 0.68, "w": 0.03, "h": 0.02}
+
     # cost ROI relative to each hand box (top-left corner of the card)
     # tweak these if your card design differs:
     # x,y,w,h are relative to the hand card rectangle (0..1, origin at hand box top-left)
     cost_roi_rel = {"x": 0.05, "y": 0.05, "w": 0.22, "h": 0.30}
+
+    upgrade_arrow_rel = {"x": 0.82, "y": 0.05, "w": 0.25, "h": 0.30}
 
     hand = []
     for xc in hand_centers_x:
@@ -222,7 +228,8 @@ def main():
             "cy": float(hand_y),
             "w": float(hand_w),
             "h": float(hand_h),
-            "cost_roi_rel": cost_roi_rel
+            "cost_roi_rel": cost_roi_rel,
+            "upgrade_arrow_rel": upgrade_arrow_rel
         }
         hand.append(hand_entry)
 
@@ -236,12 +243,12 @@ def main():
         "board_rect_full": full_norm,
         "board_rect_playable": playable_norm,
         "board": {"rows": args.rows, "cols": args.cols, "tiles": tiles},
-        "bench": {"slots": bench_slots},
+        "bench": bench_slots,
         "hand": hand,
         "mana_roi": mana_roi,
     }
 
-    out_json = Path("geometry.json")
+    out_json = Path("../geometry.json")
     with open(out_json, "w") as f:
         json.dump(geometry, f, indent=2)
 
@@ -285,9 +292,22 @@ def main():
         cax, cay, caw, cah = to_abs_rect(cost_abs_norm, W, H)
         draw_labeled_rect(overlay, (cax, cay, caw, cah), (0, 140, 255), f"C{i+1}")
 
+        # upgrade arrow
+        arrow_abs_norm = rel_child_abs_norm(parent_center_norm, parent_size_norm, hbox["upgrade_arrow_rel"])
+        ax, ay, aw, ah = to_abs_rect(arrow_abs_norm, W, H)
+        draw_labeled_rect(overlay, (ax, ay, aw, ah), (0, 255, 0), f"U{i+1}")
+
     # draw mana and sell
     mx, my, mw_, mh_ = to_abs_rect(mana_roi, W, H)
     draw_labeled_rect(overlay, (mx, my, mw_, mh_), (0, 255, 255), "MANA")
+
+    # draw round phase
+    rx, ry, rw, rh = to_abs_rect(round_phase_roi, W, H)
+    draw_labeled_rect(overlay, (rx, ry, rw, rh), (50, 255, 50), "ROUND/PHASE")
+
+    # draw health
+    hx, hy, hw, hh = to_abs_rect(health_roi, W, H)
+    draw_labeled_rect(overlay, (hx, hy, hw, hh), (255, 50, 50), "HEALTH")
 
     out_dir = args.out_dir
     out_overlay = out_dir / "annotated_geometry_overlay.png"
