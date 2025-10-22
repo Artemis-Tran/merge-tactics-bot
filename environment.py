@@ -106,11 +106,8 @@ def hand_abs_cost_rects(
         rects.append((x, y, w, h))
     return rects
 
-
-# Matching
-
 def _match_digit(roi: np.ndarray) -> string:
-    """Given a **single-digit** ROI (already cropped), preprocess and match against templates."""
+    """Given a **single-digit** ROI (already cropped), uses OCR to find digit."""
     pilImg = Image.fromarray(roi)
     text = pytesseract.image_to_string(pilImg, config='--psm 7 -c tessedit_char_whitelist=0123456789')
     return text.strip()
@@ -120,7 +117,7 @@ def _match_digit(roi: np.ndarray) -> string:
 def read_mana(image_path: Path | str) -> np.ndarray:
     """
     Reads the *mana pool* digit from the ROI defined in geometry.json using template matching.
-    Returns: (digit, score, debug_dir)
+    Returns total mana
     """
     img = cv2.imread(str(image_path))
     if img is None:
@@ -140,7 +137,7 @@ def read_mana(image_path: Path | str) -> np.ndarray:
 def read_hand_costs(image_path: Path | str):
     """
     Reads the visible *hand* card costs using the cost ROI relative to each card rect from geometry.json.
-    Returns a list aligned with geom['hand']: [(digit, score, debug_dir), ...]
+    Returns a list of the mana costs
     """
     img = cv2.imread(str(image_path))
     if img is None:
@@ -158,7 +155,6 @@ def read_hand_costs(image_path: Path | str):
         results.append(res)
 
     return results
-
 
 
 # CLI (quick manual test)
