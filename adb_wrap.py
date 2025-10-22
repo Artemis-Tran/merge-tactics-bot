@@ -26,9 +26,9 @@ def adb_cmd(*args):
         base += ["-s", ADB_DEVICE]
     return base + [str(a) for a in args]
 
-def adb_screenshot(out_path):
-    with open(out_path, "wb") as f:
-        subprocess.run(adb_cmd("exec-out", "screencap", "-p"), stdout=f, check=True)
+def adb_screenshot():
+    p = subprocess.run(adb_cmd("exec-out", "screencap", "-p"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    return p.stdout
 
 def adb_tap(x, y):
     subprocess.check_call(adb_cmd("shell", "input", "tap", x, y))
