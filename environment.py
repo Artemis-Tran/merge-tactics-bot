@@ -461,13 +461,12 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     H, W = frame_bgr.shape[:2]
     geom = load_geometry()
     rx, ry, rw, rh = get_abs_rect(geom, "round_phase", W, H)
-
+    
     roi = _crop(frame_bgr, (rx, ry, rw, rh))
-
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
     text = pytesseract.image_to_string(thresh)
-    cv2.imwrite("example.png", thresh)
+
     cleaned = text.strip().replace('\n', ' ')
     match = re.search(r"Round\s*([0-9|Il]+).*?(Battle|Deploy)", cleaned, re.IGNORECASE)
 
