@@ -209,7 +209,7 @@ def main():
 
     round_phase_roi = {"x": 0.02, "y": 0.11, "w": 0.20, "h": 0.05}
 
-    health_roi = {"x": 0.835, "y": 0.68, "w": 0.03, "h": 0.02}
+    health_roi = {"x": 0.79, "y": 0.68, "w": 0.115, "h": 0.005}
 
     # cost ROI relative to each hand box (top-left corner of the card)
     # tweak these if your card design differs:
@@ -242,7 +242,8 @@ def main():
         "board": {"rows": args.rows, "cols": args.cols, "tiles": tiles},
         "bench": bench_slots,
         "hand": hand,
-        "mana_roi": mana_roi,
+        "mana": mana_roi,
+        "health": health_roi,
     }
 
     out_json = Path("../geometry.json")
@@ -294,7 +295,7 @@ def main():
         ax, ay, aw, ah = to_abs_rect(arrow_abs_norm, W, H)
         draw_labeled_rect(overlay, (ax, ay, aw, ah), (0, 255, 0), f"U{i+1}")
 
-    # draw mana and sell
+    # draw mana
     mx, my, mw_, mh_ = to_abs_rect(mana_roi, W, H)
     draw_labeled_rect(overlay, (mx, my, mw_, mh_), (0, 255, 255), "MANA")
 

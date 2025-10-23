@@ -29,7 +29,7 @@ RUNS_DIR = Path("runs") / "vision"
 CARD_REFS_DIR = Path("assets/cards")  
 CARDS_INFO_PATH = Path("cards.json")
 _CARD_INFO: dict[str, dict] | None = None
-TESS_MULTI  = "--psm 8  --oem 1 -c tessedit_char_whitelist=0123456789"
+TESS_MULTI  = "--psm 10  --oem 1 -c tessedit_char_whitelist=0123456789"
 
 # Utilities
 ImgLike = Union[str, Path, np.ndarray]
@@ -75,7 +75,7 @@ def _clean_roi(img: np.ndarray) -> np.ndarray:
     H,S,V = cv2.split(hsv)
 
     V_min = 170
-    S_max = 40
+    S_max = 250
    
     mask = cv2.inRange(hsv, (0, 0, V_min), (180, S_max, 255)) 
 
@@ -108,6 +108,36 @@ def _has_upgrade_green(roi_bgr: np.ndarray,
 
     frac = float(np.count_nonzero(mask)) / float(mask.size)
     return frac >= min_frac
+
+def _is_blue_stripe(roi_bgr: np.ndarray,
+                    x_frac: float,
+                    stripe_frac: float = 0.06,
+                    h_lo: int = 95, h_hi: int = 130,  # OpenCV Hue 0..180; 100~120 ≈ deep blue/cyan
+                    s_lo: int = 120, v_lo: int = 120,
+                    min_blue_frac: float = 0.25) -> bool:
+    """
+    Returns True if a vertical stripe centered at x_frac contains enough 'blue' pixels.
+    stripe_frac: stripe width as fraction of ROI width.
+    min_blue_frac: required fraction of blue pixels within the stripe.
+    """
+    if roi_bgr.size == 0:
+        return False
+
+    Ht, Wd = roi_bgr.shape[:2]
+    w = max(1, int(Wd * stripe_frac))
+    cx = int(Wd * np.clip(x_frac, 0.0, 1.0))
+    x0 = max(0, cx - w // 2); x1 = min(Wd, cx + w // 2)
+    stripe = roi_bgr[:, x0:x1]
+
+    hsv = cv2.cvtColor(stripe, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (h_lo, s_lo, v_lo), (h_hi, 255, 255))
+
+    # small cleanup
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+
+    frac = float(np.count_nonzero(mask)) / float(mask.size)
+    return frac >= min_blue_frac
     
 # Geometry
 def load_geometry(path: Path = GEOM_PATH) -> dict:
@@ -116,8 +146,12 @@ def load_geometry(path: Path = GEOM_PATH) -> dict:
 
 
 def mana_norm_roi(geom: dict) -> Tuple[float,float,float,float]:
-    r = geom["mana_roi"]
+    r = geom["mana"]
     return (float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"]))
+
+def health_abs_rect(geom: dict, W: int, H: int) -> tuple[int,int,int,int]:
+    r = geom["health"]
+    return _to_abs_rect((float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"])), W, H)
 
 def hand_abs_rects(geom: dict, W: int, H: int, inset_norm: float = 0.04) -> List[Tuple[int,int,int,int]]:
     """
@@ -383,6 +417,47 @@ def read_mana(img: ImgLike) -> Tuple[str, float]:
     text, conf = _match_digit(roi, TESS_MULTI)
     return text, conf
 
+def read_health(img: ImgLike) -> int:
+    """
+    Quantized health from the blue bar:
+      - Probe stripes at 25%, 50%, 75% of the health ROI width.
+      - If 75% stripe is blue ⇒ ≥75% (then check 100% by looking near the far-right edge).
+      - If 50% stripe is blue ⇒ ≥50%.
+      - If 25% stripe is blue ⇒ ≥25%.
+      - Else 0%.
+    Returns: int representing percent
+    """
+    frame_bgr = _as_bgr(img)
+    H, W = frame_bgr.shape[:2]
+    geom = load_geometry()
+    rx, ry, rw, rh = health_abs_rect(geom, W, H)
+
+    roi = _crop(frame_bgr, (rx, ry, rw, rh))
+
+    p10  = _is_blue_stripe(roi, 0.10)
+    p20  = _is_blue_stripe(roi, 0.20)
+    p30  = _is_blue_stripe(roi, 0.30)
+    p40  = _is_blue_stripe(roi, 0.40)
+    p50  = _is_blue_stripe(roi, 0.50)
+    p60  = _is_blue_stripe(roi, 0.60)
+    p70  = _is_blue_stripe(roi, 0.70)
+    p80  = _is_blue_stripe(roi, 0.80)
+    p90  = _is_blue_stripe(roi, 0.90)
+    p100 = _is_blue_stripe(roi, 0.97, stripe_frac=0.04)
+
+    percent = 0
+    for level, probe in ([
+        (100, p100), (90, p90), (80, p80), (70, p70),
+        (60, p60), (50, p50), (40, p40), (30, p30),
+        (20, p20), (10, p10)
+    ]):
+        if probe:
+            percent = level
+            break
+
+    return percent
+
+
 # CLI (quick manual test)
 if __name__ == "__main__":
     import argparse, sys
@@ -391,7 +466,10 @@ if __name__ == "__main__":
     ap.add_argument("image", type=str, help="Path to screenshot image")
     args = ap.parse_args()
 
-    res = read_mana(args.image)
-    print(f"Mana: {res}")
+    mana = read_mana(args.image)
+    print(f"Mana: {mana[0]} ({mana[1]})")
+
+    health = read_health(args.image)
+    print(f"Health: {health}")
 
  

@@ -23,7 +23,7 @@ def norm_to_abs_rect(nr, W, H):
 
 def main():
     geom = json.loads(GEOM_PATH.read_text())
-    mana_roi_norm = geom["mana_roi"]  # expects keys: x,y,w,h in [0,1]
+    mana_roi_norm = geom["mana"]  # expects keys: x,y,w,h in [0,1]
 
     imgs = sorted([p for p in SRC_DIR.iterdir() if p.suffix.lower() in {".png",".jpg",".jpeg"}])
     if not imgs:
