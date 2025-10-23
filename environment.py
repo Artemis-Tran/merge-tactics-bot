@@ -12,6 +12,7 @@ Assumptions:
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import string
 from PIL import Image
 from typing import List, Tuple, Union
@@ -66,7 +67,7 @@ def _crop(img: np.ndarray, rect: Tuple[int,int,int,int]) -> np.ndarray:
     x,y,w,h = rect
     return img[max(0,y):y+h, max(0,x):x+w].copy()
 
-
+# Cleaning for OCR
 def _clean_roi(img: np.ndarray) -> np.ndarray:
     img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
@@ -144,16 +145,14 @@ def load_geometry(path: Path = GEOM_PATH) -> dict:
     with open(path, "r") as f:
         return json.load(f)
 
-
-def mana_norm_roi(geom: dict) -> Tuple[float,float,float,float]:
-    r = geom["mana"]
-    return (float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"]))
-
-def health_abs_rect(geom: dict, W: int, H: int) -> tuple[int,int,int,int]:
-    r = geom["health"]
+def get_abs_rect(geom: dict, key: str, W: int, H: int) -> Tuple[int,int,int,int]:
+    """Return absolute rect (x, y, w, h) in pixels for a top-level geometry key."""
+    if key not in geom:
+        raise KeyError(f"No ROI named '{key}' in geometry.json")
+    r = geom[key]
     return _to_abs_rect((float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"])), W, H)
 
-def hand_abs_rects(geom: dict, W: int, H: int, inset_norm: float = 0.04) -> List[Tuple[int,int,int,int]]:
+def hand_abs_rects(geom: dict, W: int, H: int, inset_norm: float = 0.05) -> List[Tuple[int,int,int,int]]:
     """
     Build per-hand art rectangles. Uses the full card rect,
     then applies a small normalized inset to stay off the silver/rarity frame.
@@ -410,7 +409,7 @@ def read_mana(img: ImgLike) -> Tuple[str, float]:
     H, W = frame_bgr.shape[:2]
 
     geom = load_geometry()
-    rect = _to_abs_rect(mana_norm_roi(geom), W, H)
+    rect = get_abs_rect(geom, "mana", W, H)
     roi = _crop(frame_bgr, rect)
     roi = _clean_roi(roi)
 
@@ -430,7 +429,7 @@ def read_health(img: ImgLike) -> int:
     frame_bgr = _as_bgr(img)
     H, W = frame_bgr.shape[:2]
     geom = load_geometry()
-    rx, ry, rw, rh = health_abs_rect(geom, W, H)
+    rx, ry, rw, rh = get_abs_rect(geom, "health", W, H)
 
     roi = _crop(frame_bgr, (rx, ry, rw, rh))
 
@@ -457,6 +456,32 @@ def read_health(img: ImgLike) -> int:
 
     return percent
 
+def read_round_phase(img: ImgLike) -> Tuple[int, str]:
+    frame_bgr = _as_bgr(img)
+    H, W = frame_bgr.shape[:2]
+    geom = load_geometry()
+    rx, ry, rw, rh = get_abs_rect(geom, "round_phase", W, H)
+
+    roi = _crop(frame_bgr, (rx, ry, rw, rh))
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+    text = pytesseract.image_to_string(thresh)
+    cv2.imwrite("example.png", thresh)
+    cleaned = text.strip().replace('\n', ' ')
+    match = re.search(r"Round\s*([0-9|Il]+).*?(Battle|Deploy)", cleaned, re.IGNORECASE)
+
+    if match:
+        raw_num = match.group(1)
+        # Fix common OCR confusion: "|" → "1"
+        round_num = int(raw_num.replace('|', '1'))
+        phase = match.group(2).lower()
+        result = (round_num, phase)
+    else:
+        result = None
+    return result
+
+
 
 # CLI (quick manual test)
 if __name__ == "__main__":
@@ -471,5 +496,15 @@ if __name__ == "__main__":
 
     health = read_health(args.image)
     print(f"Health: {health}")
+
+    round, phase = read_round_phase(args.image)
+    if round and phase:
+        print(f"Round: {round}, Phase: {phase}")
+    else:
+        print("No round and phase")
+
+
+
+
 
  

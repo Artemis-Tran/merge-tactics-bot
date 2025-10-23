@@ -244,6 +244,7 @@ def main():
         "hand": hand,
         "mana": mana_roi,
         "health": health_roi,
+        "round_phase": round_phase_roi,
     }
 
     out_json = Path("../geometry.json")
