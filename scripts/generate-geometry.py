@@ -99,10 +99,10 @@ def rel_child_abs_norm(parent_center_norm, parent_size_norm, child_rel):
     # parent top-left in norm
     p_x = pcx - pw / 2.0
     p_y = pcy - ph / 2.0
-    ax = p_x + child_rel["x"] * pw
-    ay = p_y + child_rel["y"] * ph + 0.005
+    ax = p_x + child_rel["x"] * pw 
+    ay = p_y + child_rel["y"] * ph 
     aw = child_rel["w"] * pw
-    ah = child_rel["h"] * ph - 0.016
+    ah = child_rel["h"] * ph 
     return {"x": ax, "y": ay, "w": aw, "h": ah}
 
 
@@ -169,9 +169,6 @@ def compute_bench_slots(playable_rect_px, hand_boxes_norm, W, H, n_slots=5, benc
         x_cursor += w_i
 
     return slots
-    
-    
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -206,9 +203,9 @@ def main():
              for (cx, cy) in centers]
 
     # 3 hardcoded hand slots
-    hand_centers_x = [0.26, 0.42, 0.58]
-    hand_y = 0.92
-    hand_w, hand_h = 0.15, 0.12
+    hand_centers_x = [0.27, 0.43, 0.59]
+    hand_y = 0.928
+    hand_w, hand_h = 0.14, 0.10
 
     round_phase_roi = {"x": 0.02, "y": 0.11, "w": 0.20, "h": 0.05}
 
@@ -217,9 +214,9 @@ def main():
     # cost ROI relative to each hand box (top-left corner of the card)
     # tweak these if your card design differs:
     # x,y,w,h are relative to the hand card rectangle (0..1, origin at hand box top-left)
-    cost_roi_rel = {"x": 0.05, "y": 0.05, "w": 0.22, "h": 0.30}
+    cost_roi_rel = {"x": -0.05, "y": -0.065, "w": 0.22, "h": 0.17}
 
-    upgrade_arrow_rel = {"x": 0.82, "y": 0.05, "w": 0.25, "h": 0.30}
+    upgrade_arrow_rel = {"x": 0.82, "y": -0.065, "w": 0.22, "h": 0.17}
 
     hand = []
     for xc in hand_centers_x:
