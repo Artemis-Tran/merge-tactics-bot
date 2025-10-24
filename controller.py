@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple, Union
 
-from adb_wrap import adb_swipe  # uses ADB_DEVICE env if set
+from adb_wrap import adb_swipe, adb_tap
 
 # Geometry / config paths
 GEOM_PATH = Path("geometry.json")
@@ -124,6 +124,11 @@ def drag(src: Slot, dst: Slot, duration_ms: int = 120) -> None:
     x1, y1 = _slot_center(src, geom)
     x2, y2 = _slot_center(dst, geom)
     adb_swipe(x1, y1, x2, y2, duration_ms)
+
+def quick_buy(hand: Hand) -> None:
+    geom = _load_geom(GEOM_PATH)
+    x1, y1 = _slot_center(hand, geom)
+    adb_tap(x1, y1)
 
 # Minimal CLI for quick manual tests
 _KIND_PATTERNS = {
