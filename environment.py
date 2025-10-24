@@ -355,10 +355,12 @@ class CardMatch:
 
 
     # Extra metadata from cards.json
+    idx: int | None = None
     cost: int | None = None
     type: str | None = None
     trait1: str | None = None
     trait2: str | None = None
+
 
 class _CardRecognizer:
     """pHash shortlist + ORB re-ranking"""
@@ -475,6 +477,7 @@ def read_cards(img: ImgLike) -> List[CardMatch]:
         # enrich metadata
         if match.label and match.label in card_info:
             info = card_info[match.label]
+            match.idx = i
             match.cost = info.get("cost")
             match.type = info.get("type")
             match.trait1 = info.get("trait1")
@@ -489,7 +492,7 @@ def read_cards(img: ImgLike) -> List[CardMatch]:
     return results
 
 
-def read_mana(img: ImgLike) -> Tuple[str, float]:
+def read_mana(img: ImgLike) -> Tuple[int, float]:
     """
     Read the mana pool. Returns (text, avg_conf).
     - text may contain multiple digits (e.g., '10')
@@ -507,7 +510,7 @@ def read_mana(img: ImgLike) -> Tuple[str, float]:
     if conf < 20:
         text = ""
         conf = -1
-    return text, conf
+    return int(text), conf
 
 def read_health(img: ImgLike) -> int:
     """
@@ -605,7 +608,7 @@ if __name__ == "__main__":
 
     for c in state.cards:
         if c.label:
-            print(f"{c.label:15s} conf={c.conf:.2f} cost={c.cost} type={c.type} "
+            print(f"{c.label:15s} conf={c.conf:.2f} idx={c.idx} cost={c.cost} type={c.type} "
                 f"traits=({c.trait1}, {c.trait2}) upg={c.upgradable}")
     print(f"\n--- Runtime: {time.perf_counter() - start:.3f} seconds ---")
 
