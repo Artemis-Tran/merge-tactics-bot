@@ -17,11 +17,13 @@ import string
 from PIL import Image
 from typing import Dict, List, Optional, Tuple, Union
 import json
+import time
 
 
 import cv2
 import numpy as np
 import pytesseract
+from concurrent.futures import ThreadPoolExecutor
 
 
 GEOM_PATH = Path("geometry.json")
@@ -267,7 +269,7 @@ def segment_digits(bin_img: np.ndarray, tmpls: Dict[str, np.ndarray]) -> Tuple[n
         pad_to_match_template_bbox(right, tmpl_any),
     )
 
-def _match_digit(roi: np.ndarray, cfg: str) -> string:
+def _match_digit(roi: np.ndarray, cfg: str) -> Tuple[str, float]:
     """
     Returns (digits_only, avg_conf). Conf is mean over symbols with non-negative conf,
     as reported by pytesseract.image_to_data.
@@ -275,7 +277,6 @@ def _match_digit(roi: np.ndarray, cfg: str) -> string:
 
     H, W = roi.shape[:2]
     tmpls = load_digit_templates()
-    cv2.imwrite(f"runs/roi-template.png", roi)
     best_digit, best_score = -1, -1.0
     for digit, template in tmpls.items():
         score = float(cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)[0][0])
@@ -395,7 +396,7 @@ class _CardRecognizer:
         self.ref_kp = kps
         self.ref_desc = descs
 
-    def predict(self, roi_bgr: np.ndarray, topk: int = 6) -> CardMatch:
+    def predict(self, roi_bgr: np.ndarray, topk: int = 4) -> CardMatch:
         q = _cr_preprocess_art(roi_bgr, self.inset)
         q_hash = _cr_phash(q)
         q_kp, q_desc = self.orb.detectAndCompute(q, None)
@@ -421,7 +422,7 @@ class _CardRecognizer:
 
         conf = 1.0 / (1.0 + np.exp(-4.0 * (best_score - 0.7)))  # squashed, center ~0.7
 
-        if best_idx < 0:
+        if best_idx < 0.5:
             return CardMatch(label=None, conf=0.0, method="phash+orb",
                              details={"orb_score": 0.0, "good": 0, "phash_best": float(dists.min())})
         return CardMatch(
@@ -432,6 +433,15 @@ class _CardRecognizer:
         )
 
 # Public APIs
+
+@dataclass
+class GameState:
+    mana: str
+    mana_conf: float
+    health: int                       # {0,10,20,...,100}
+    round: Optional[int]
+    phase: Optional[str]                  # 'deploy' or 'battle'
+    cards: List[CardMatch]                # matches for cards in hand
 
 _CARD_MODEL: _CardRecognizer | None = None
 
@@ -458,20 +468,24 @@ def read_cards(img: ImgLike) -> List[CardMatch]:
     card_info = load_card_info()
 
     results: list[CardMatch] = []
-    for i in range(len(card_rects)):
+    def process_card(i: int) -> CardMatch:
         roi = _crop(frame_bgr, card_rects[i])
-        match = _CARD_MODEL.predict(roi)
+        match = _CARD_MODEL.predict(roi) 
 
+        # enrich metadata
         if match.label and match.label in card_info:
             info = card_info[match.label]
             match.cost = info.get("cost")
             match.type = info.get("type")
             match.trait1 = info.get("trait1")
             match.trait2 = info.get("trait2")
-   
+
+        # upgrade arrow
         roi_upg = _crop(frame_bgr, upg_rects[i])
         match.upgradable = _has_upgrade_green(roi_upg)
-        results.append(match)
+        return match
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        results = list(ex.map(process_card, range(len(card_rects))))
     return results
 
 
@@ -490,6 +504,9 @@ def read_mana(img: ImgLike) -> Tuple[str, float]:
     roi = _clean_roi(roi)
 
     text, conf = _match_digit(roi, TESS_MULTI)
+    if conf < 20:
+        text = ""
+        conf = -1
     return text, conf
 
 def read_health(img: ImgLike) -> int:
@@ -556,6 +573,18 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
         result = (None, None)
     return result
 
+def get_state(img: ImgLike) -> GameState:
+    mana, mana_conf = read_mana(img)
+    health = read_health(img)
+    round, phase = read_round_phase(img)
+    return GameState(
+        mana=mana,
+        mana_conf=mana_conf,
+        health=health,
+        round=round,
+        phase=phase,
+        cards=read_cards(img),
+    )
 
 
 # CLI (quick manual test)
@@ -566,24 +595,19 @@ if __name__ == "__main__":
     ap.add_argument("image", type=str, help="Path to screenshot image")
     args = ap.parse_args()
 
-    mana = read_mana(args.image)
-    print(f"Mana: {mana[0]} ({mana[1]})")
+    start = time.perf_counter()   # start high-res timer
+    state = get_state(args.image)
 
-    health = read_health(args.image)
-    print(f"Health: {health}")
+    print(f"Mana: {state.mana} ({state.mana_conf:.2f}% confi)")
+    print(f"Health: {state.health}")
+    print(f"Round: {state.round}")
+    print(f"Phase: {state.phase}")
 
-    round, phase = read_round_phase(args.image)
-    if round and phase:
-        print(f"Round: {round}, Phase: {phase}")
-    else:
-        print("No round and phase")
-
-    cards = read_cards(args.image)
-    for c in cards:
+    for c in state.cards:
         if c.label:
             print(f"{c.label:15s} conf={c.conf:.2f} cost={c.cost} type={c.type} "
                 f"traits=({c.trait1}, {c.trait2}) upg={c.upgradable}")
-
+    print(f"\n--- Runtime: {time.perf_counter() - start:.3f} seconds ---")
 
 
 
