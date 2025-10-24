@@ -16,7 +16,7 @@
   "Musketeer": { "cost": 3, "type": "ranged", "trait1": "Noble", "trait2": "Blaster" },
   "Princess": { "cost": 4, "type": "ranged", "trait1": "Noble", "trait2": "Ranger" },
   "BabyDragon": { "cost": 4, "type": "ranged", "trait1": "Fire", "trait2": "Blaster" },
-  "Mega Knight": { "cost": 4, "type": "melee", "trait1": "Ace", "trait2": "Brawler" },
+  "MegaKnight": { "cost": 4, "type": "melee", "trait1": "Ace", "trait2": "Brawler" },
   "RoyalGhost": { "cost": 4, "type": "melee", "trait1": "Undead", "trait2": "Assassin" },
   "Witch": { "cost": 4, "type": "ranged", "trait1": "Undead", "trait2": "Avenger" },
   "Bandit": { "cost": 4, "type": "melee", "trait1": "Ace", "trait2": "Assassin" },
