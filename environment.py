@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import string
 from PIL import Image
-from typing import List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import json
 
 
@@ -30,9 +30,10 @@ RUNS_DIR = Path("runs") / "vision"
 CARD_REFS_DIR = Path("assets/cards")  
 CARDS_INFO_PATH = Path("cards.json")
 _CARD_INFO: dict[str, dict] | None = None
+_TMPL_CACHE: Optional[Dict[int, np.ndarray]] = None
 TESS_MULTI  = "--psm 10  --oem 1 -c tessedit_char_whitelist=0123456789"
 
-# Utilities
+# Helpers
 ImgLike = Union[str, Path, np.ndarray]
 
 def _as_bgr(img: ImgLike) -> np.ndarray:
@@ -75,8 +76,8 @@ def _clean_roi(img: np.ndarray) -> np.ndarray:
     hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     H,S,V = cv2.split(hsv)
 
-    V_min = 170
-    S_max = 250
+    V_min = 230
+    S_max = 40
    
     mask = cv2.inRange(hsv, (0, 0, V_min), (180, S_max, 255)) 
 
@@ -87,6 +88,21 @@ def _clean_roi(img: np.ndarray) -> np.ndarray:
 
     res = 255 - mask
     return res
+
+def load_digit_templates(dirpath: Path = TEMPLATES_DIR) -> dict[int, np.ndarray]:
+    global _TMPL_CACHE
+    if _TMPL_CACHE is not None:
+        return _TMPL_CACHE
+    tmpls: dict[int, np.ndarray] = {}
+    for d in range(10):
+        p = dirpath / f"{d}.png"
+        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise FileNotFoundError(f"Could not read digit template: {p}")
+        tmpls[d] = img
+    _TMPL_CACHE = tmpls
+    return tmpls
+
 
 def _has_upgrade_green(roi_bgr: np.ndarray,
                        h_lo: int = 45, h_hi: int = 85,
@@ -194,38 +210,98 @@ def hand_abs_upgrade_rects(
         rects.append(_to_abs_rect((x_norm, y_norm, w_norm, h_norm), W, H))
     return rects
 
+def segment_digits(bin_img: np.ndarray, tmpls: Dict[str, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Split a binarized image (white bg=255, black digits=0) into two digits
+    and pad each to the template size using the template's foreground bbox.
+    """
+    def tight_bbox_black_on_white(img: np.ndarray):
+        g = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        fg = (g < 128).astype(np.uint8)
+        ys, xs = np.where(fg > 0)
+        if xs.size == 0 or ys.size == 0:
+            return 0, 1, 0, 1
+        return ys.min(), ys.max()+1, xs.min(), xs.max()+1
+
+    def pad_to_match_template_bbox(digit_img: np.ndarray, template_img: np.ndarray):
+
+        Ht, Wt = template_img.shape[:2]
+        y0t, y1t, x0t, x1t = tight_bbox_black_on_white(template_img)
+        y0, y1, x0, x1 = tight_bbox_black_on_white(digit_img)
+        crop = digit_img[y0:y1, x0:x1]
+
+        h, w = crop.shape
+        target_h, target_w = y1t - y0t, x1t - x0t
+        scale = min(target_h / max(1, h), target_w / max(1, w))
+        nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+        resized = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_AREA)
+
+        canvas = np.full((Ht, Wt), 255, np.uint8)
+        y_off = y0t + (target_h - nh)//2
+        x_off = x0t + (target_w - nw)//2
+        canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
+        return canvas
+
+    g = bin_img if bin_img.ndim == 2 else cv2.cvtColor(bin_img, cv2.COLOR_BGR2GRAY)
+    fg = (g < 128).astype(np.uint8)
+
+    proj = fg.sum(axis=0).astype(np.float32)
+    proj_s = np.convolve(proj, np.ones(15, np.float32)/15, mode="same")
+    W = proj_s.shape[0]
+    L, R = int(W*0.35), int(W*0.65)
+    split = L + int(np.argmin(proj_s[L:R]))
+
+    def crop_side(mask: np.ndarray):
+        ys, xs = np.where(mask > 0)
+        if xs.size == 0 or ys.size == 0:
+            return np.full((1, 1), 255, np.uint8)
+        x0, x1 = xs.min(), xs.max()+1
+        y0, y1 = ys.min(), ys.max()+1
+        return ((1 - mask[y0:y1, x0:x1]) * 255).astype(np.uint8)
+
+    left = crop_side(fg[:, :split])
+    right = crop_side(fg[:, split:])
+    tmpl_any = next(iter(tmpls.values()))
+    return (
+        pad_to_match_template_bbox(left, tmpl_any),
+        pad_to_match_template_bbox(right, tmpl_any),
+    )
+
 def _match_digit(roi: np.ndarray, cfg: str) -> string:
     """
     Returns (digits_only, avg_conf). Conf is mean over symbols with non-negative conf,
     as reported by pytesseract.image_to_data.
     """
-    if roi.ndim == 3:
-        roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    data = pytesseract.image_to_data(roi, config=cfg, output_type=pytesseract.Output.DICT)
+    H, W = roi.shape[:2]
+    tmpls = load_digit_templates()
+    cv2.imwrite(f"runs/roi-template.png", roi)
+    best_digit, best_score = -1, -1.0
+    for digit, template in tmpls.items():
+        score = float(cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)[0][0])
+        if score > best_score:
+            best_digit, best_score = digit, score
 
-    digits: List[str] = []
-    confs: List[float] = []
-    n = len(data.get("text", []))
+    if best_score >= 0.65:
+        return str(best_digit), round(best_score, 2) * 100.0
+    
+    # Must be double digit
+    left_digit, right_digit = segment_digits(roi, tmpls)
 
-    for i in range(n):
-        raw = (data["text"][i] or "").strip()
-        if not raw:
-            continue
-        ds = "".join(ch for ch in raw if ch.isdigit())
-        if not ds:
-            continue
-        digits.append(ds)
-        try:
-            c = float(data.get("conf", ["-1"])[i])
-            if c >= 0:
-                confs.append(c)
-        except Exception:
-            pass
+    best_left_digit, best_left_score = -1, -1.0
+    best_right_digit, best_right_score = -1, -1.0
+    for digit, template in tmpls.items():
+        left_score = float(cv2.matchTemplate(left_digit, template, cv2.TM_CCOEFF_NORMED)[0][0])
+        right_score = float(cv2.matchTemplate(right_digit, template, cv2.TM_CCOEFF_NORMED)[0][0])
+        if left_score > best_left_score:
+            best_left_digit, best_left_score = digit, left_score
+        if right_score > best_right_score:
+            best_right_digit, best_right_score = digit, right_score
 
-    text = "".join(digits)
-    avg_conf = float(np.mean(confs)) if confs else -1.0
-    return text, avg_conf
+    best_digit = str(best_left_digit) + str(best_right_digit)
+    best_score = (best_left_score + best_right_score) / 2.0
+        
+    return str(best_digit), round(best_score, 2) * 100.0
 
 # Card Recognizer Helpers
 
@@ -336,7 +412,7 @@ class _CardRecognizer:
             matches = self.bfm.knnMatch(q_desc, ref_d, k=2)
             good = 0
             for m, n in matches:
-                if m.distance < 0.75 * n.distance:  # Lowe ratio
+                if m.distance < 0.75 * n.distance: 
                     good += 1
             denom = max(1.0, np.sqrt((len(q_kp or []) + len(self.ref_kp[idx] or [])) / 2.0))
             score = good / denom
@@ -461,7 +537,7 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     H, W = frame_bgr.shape[:2]
     geom = load_geometry()
     rx, ry, rw, rh = get_abs_rect(geom, "round_phase", W, H)
-    
+
     roi = _crop(frame_bgr, (rx, ry, rw, rh))
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
@@ -477,7 +553,7 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
         phase = match.group(2).lower()
         result = (round_num, phase)
     else:
-        result = None
+        result = (None, None)
     return result
 
 
@@ -502,6 +578,11 @@ if __name__ == "__main__":
     else:
         print("No round and phase")
 
+    cards = read_cards(args.image)
+    for c in cards:
+        if c.label:
+            print(f"{c.label:15s} conf={c.conf:.2f} cost={c.cost} type={c.type} "
+                f"traits=({c.trait1}, {c.trait2}) upg={c.upgradable}")
 
 
 
