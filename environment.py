@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 GEOM_PATH = Path("geometry.json")
+END_GEOM_PATH = Path("end-screen-geometry.json")
 TEMPLATES_DIR = Path("assets/templates")
 RUNS_DIR = Path("runs") / "vision"
 CARD_REFS_DIR = Path("assets/cards")  
@@ -444,6 +445,7 @@ class GameState:
     round: Optional[int]
     phase: Optional[str]                  # 'deploy' or 'battle'
     cards: List[CardMatch]                # matches for cards in hand
+    game_over: bool
 
 _CARD_MODEL: _CardRecognizer | None = None
 
@@ -576,6 +578,23 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
         result = (None, None)
     return result
 
+def is_game_over(img: ImgLike) -> bool:
+    frame_bgr = _as_bgr(img)
+    H, W = frame_bgr.shape[:2]
+    geom = load_geometry(END_GEOM_PATH)
+    rx, ry, rw, rh = get_abs_rect(geom, "play_again", W, H)
+
+    roi = _crop(frame_bgr, (rx, ry, rw, rh))
+    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0, 0, 230), (180, 40, 255)) 
+    res = 255 - mask
+
+    template = cv2.imread("assets/templates/play_again.png", cv2.IMREAD_GRAYSCALE)
+    score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
+    return score > 0.6
+
+
+
 def get_state(img: ImgLike) -> GameState:
     mana, mana_conf = read_mana(img)
     health = read_health(img)
@@ -587,7 +606,30 @@ def get_state(img: ImgLike) -> GameState:
         round=round,
         phase=phase,
         cards=read_cards(img),
+        game_over=is_game_over(img)
     )
+
+   
+def get_placement(img: ImgLike) -> int:
+    frame_bgr = _as_bgr(img)
+    H, W = frame_bgr.shape[:2]
+    geom = load_geometry(END_GEOM_PATH)
+
+    for i, placement in enumerate(geom["placement"]):
+        check = placement["player_check"]
+        x, y, w, h = check["x"], check["y"], check["w"], check["h"]
+        rx, ry, rw, rh = _to_abs_rect((x, y, w, h), W, H)
+        roi = _crop(frame_bgr, (rx, ry, rw, rh))
+
+        # Convert to HSV and check for yellow hue range
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (20, 100, 150), (40, 255, 255)) 
+        frac = float(np.count_nonzero(mask)) / float(mask.size)
+
+        if frac > 0.1:  
+            return i + 1
+
+    return 0 
 
 
 # CLI (quick manual test)
@@ -605,12 +647,15 @@ if __name__ == "__main__":
     print(f"Health: {state.health}")
     print(f"Round: {state.round}")
     print(f"Phase: {state.phase}")
+    print(f"Game over: {state.game_over}")
 
     for c in state.cards:
         if c.label:
             print(f"{c.label:15s} conf={c.conf:.2f} idx={c.idx} cost={c.cost} type={c.type} "
                 f"traits=({c.trait1}, {c.trait2}) upg={c.upgradable}")
     print(f"\n--- Runtime: {time.perf_counter() - start:.3f} seconds ---")
+
+   
 
 
 

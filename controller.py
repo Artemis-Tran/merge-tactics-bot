@@ -30,6 +30,7 @@ from adb_wrap import adb_swipe, adb_tap
 
 # Geometry / config paths
 GEOM_PATH = Path("geometry.json")
+END_GEOM_PATH = Path("end-screen-geometry.json")
 
 # Slot types
 @dataclass(frozen=True)
@@ -50,7 +51,11 @@ class Pixel:
     x: int
     y: int
 
-Slot = Union[Hand, Bench, Board, Pixel]
+@dataclass(frozen=True)
+class Button:
+    type: str
+
+Slot = Union[Hand, Bench, Board, Pixel, Button]
 
 # Geometry helpers
 def _norm_to_px(val: float, total: int) -> int:
@@ -79,6 +84,17 @@ def _slot_center(slot: Slot, geom: Dict[str, Any]) -> Tuple[int, int]:
     if isinstance(slot, Pixel):
         # Already absolute pixels
         return (int(slot.x), int(slot.y))
+    
+    if isinstance(slot, Button):
+        if slot.type == "play_again":
+            button = geom.get("play_again_center") 
+            if not isinstance(button, dict):
+                raise ValueError("geometry.json missing 'Play Again' object")
+            center = _center_wh_to_rect_px(button["cx"], button["cy"], button["w"], button["h"], W, H)
+            return _rect_center(center)
+        
+        raise ValueError(f"Unsupported button type: {slot.type}")
+
 
     if isinstance(slot, Hand):
         hand = geom.get("hand")
@@ -129,6 +145,12 @@ def quick_buy(hand: Hand) -> None:
     geom = _load_geom(GEOM_PATH)
     x1, y1 = _slot_center(hand, geom)
     adb_tap(x1, y1)
+
+def play_again() -> None:
+    geom = _load_geom(END_GEOM_PATH)
+    x1, y1 = _slot_center(Button("play_again"), geom)
+    adb_tap(x1, y1)
+
 
 # Minimal CLI for quick manual tests
 _KIND_PATTERNS = {
