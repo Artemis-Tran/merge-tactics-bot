@@ -317,5 +317,82 @@ def main():
     print(f"Saved overlay PNG in:  {out_overlay.resolve()}")
 
 
+    # --- END SCREEN GEOMETRY ---
+    bgr = cv2.imread("../assets/screenshots/end-screen.png")
+    if bgr is None:
+        raise RuntimeError(f"Could not load image: {args.img}")
+    
+    H, W = bgr.shape[:2]
+
+    play_again_roi = {"x": 0.15, "y": 0.89, "w": 0.33, "h": 0.06}
+    play_again_center_roi = {
+        "cx": 0.315, 
+        "cy": 0.92,  
+        "w": 0.33,
+        "h": 0.06
+    }
+    
+    placement_roi = {"x": 0.15, "y": 0.24, "w": 0.7, "h": 0.11}
+    player_check_roi = {"x": 0.32, "y": 0.26, "w": 0.05, "h": 0.04}
+    gap = 0.023
+
+    placement_rois = []
+    for i in range(4):
+        y_offset = i * (placement_roi["h"] + gap)
+
+        r = {
+            "x": placement_roi["x"],
+            "y": placement_roi["y"] + y_offset,
+            "w": placement_roi["w"],
+            "h": placement_roi["h"],
+        }
+
+        player_check = {
+            "x": player_check_roi["x"],
+            "y": player_check_roi["y"] + y_offset,
+            "w": player_check_roi["w"],
+            "h": player_check_roi["h"],
+        }
+
+        r["player_check"] = player_check
+        placement_rois.append(r)
+
+
+    
+
+    geometry = {
+        "image_basis": "end-screen.png",
+        "resolution_px": [W, H],
+        "placement": placement_rois,
+        "play_again": play_again_roi,
+        "play_again_center": play_again_center_roi
+    }
+
+    out_json = Path("../end-screen-geometry.json")
+    with open(out_json, "w") as f:
+        json.dump(geometry, f, indent=2)
+
+    overlay = bgr.copy()
+
+    # draw play again roi
+    px, py, pw, ph = to_abs_rect(play_again_roi, W, H)
+    draw_labeled_rect(overlay, (px, py, pw, ph), (200, 200, 0), "Play Again")
+    
+
+    # draw placement rois
+    for i, roi in enumerate(placement_rois):
+        px, py, pw, ph = to_abs_rect(roi, W, H)
+        draw_labeled_rect(overlay, (px, py, pw, ph), (0, 200, 100), f"PLACEMENT {i+1}")
+        pcheck = roi["player_check"]
+        cx, cy, cw, ch = to_abs_rect(pcheck, W, H)
+        draw_labeled_rect(overlay, (cx, cy, cw, ch), (0, 255, 0), f"CHECK {i+1}")
+
+    out_overlay =  "../assets/screenshots/annotated_end_screen_geometry_overlay.png"
+    ok = cv2.imwrite(str(out_overlay), overlay)
+
+    print(f"Saved geometry.json in: {out_json.resolve()}")
+    print(f"Saved overlay PNG in:  {out_overlay}")
+
+
 if __name__ == "__main__":
     main()
