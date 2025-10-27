@@ -14,7 +14,7 @@ This project is a bot for the mobile game "Merge Tactics". It uses computer visi
   - Drag and drop units from hand/bench to the board.
   - Sell units.
   - Buy units.
-  - Start a new game after finishing one.
+  - Repeat
 - **Configurable Geometry**: The screen layout (positions of cards, mana, etc.) is defined in a `geometry.json` file, making it adaptable to different screen resolutions.
 
 ## Core Components
