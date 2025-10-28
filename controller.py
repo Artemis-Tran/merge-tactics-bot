@@ -113,7 +113,9 @@ def _slot_center(slot: Slot, geom: Dict[str, Any]) -> Tuple[int, int]:
         if not (0 <= slot.idx < len(bench)):
             raise IndexError(f"bench index {slot.idx} out of range (have {len(bench)}).")
         b = bench[slot.idx]
-        r = _center_wh_to_rect_px(b["x"], b["y"], b["w"], b["h"], W, H)
+        cx = b["x"] + b["w"] / 2.0
+        cy = b["y"] + b["h"] / 2.0
+        r = _center_wh_to_rect_px(cx, cy, b["w"], b["h"], W, H)
         return _rect_center(r)
 
     if isinstance(slot, Board):
