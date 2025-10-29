@@ -4,4 +4,5 @@ pygetwindow
 pydirectinput
 numpy
 pytesseract
-
+inference
+python-dotenv
