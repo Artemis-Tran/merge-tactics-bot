@@ -11,6 +11,7 @@ Assumptions:
 
 from __future__ import annotations
 from dataclasses import dataclass
+import io
 from pathlib import Path
 import re
 import string
@@ -18,12 +19,14 @@ from PIL import Image
 from typing import Dict, List, Optional, Tuple, Union
 import json
 import time
-
+import os
+from dotenv import load_dotenv
 
 import cv2
 import numpy as np
 import pytesseract
 from concurrent.futures import ThreadPoolExecutor
+from inference_sdk import InferenceHTTPClient
 
 
 GEOM_PATH = Path("geometry.json")
@@ -35,6 +38,36 @@ CARDS_INFO_PATH = Path("cards.json")
 _CARD_INFO: dict[str, dict] | None = None
 _TMPL_CACHE: Optional[Dict[int, np.ndarray]] = None
 TESS_MULTI  = "--psm 10  --oem 1 -c tessedit_char_whitelist=0123456789"
+
+# Roboflow class name to game label mapping
+CLASS_TO_LABEL = {
+    "archer": "Archers",
+    "archer-queen": "ArcherQueen",
+    "baby-dragon": "BabyDragon",
+    "bandit": "Bandit",
+    "barbarian": "Barbarians",
+    "dart-goblin": "DartGoblin",
+    "electro-giant": "ElectroGiant",
+    "electro-wizard": "ElectroWizard",
+    "executioner": "Executioner",
+    "giant-skeleton": "GiantSkeleton",
+    "goblin-machine": "GoblinMachine",
+    "golden-knight": "GoldenKnight",
+    "knight": "Knight",
+    "mega-knight": "MegaKnight",
+    "musketeer": "Musketeer",
+    "pekka": "PEKKA",
+    "prince": "Prince",
+    "princess": "Princess",
+    "royal-ghost": "RoyalGhost",
+    "skeleton-dragon": "SkeletonDragon",
+    "skeleton-king": "SkeletonKing",
+    "spear-goblin": "SpearGoblin",
+    "stab-goblin": "Goblins",
+    "valkyrie": "Valkyrie",
+    "witch": "Witch",
+    "wizard": "Wizard",
+}
 
 # Helpers
 ImgLike = Union[str, Path, np.ndarray]
@@ -212,6 +245,21 @@ def hand_abs_upgrade_rects(
 
         rects.append(_to_abs_rect((x_norm, y_norm, w_norm, h_norm), W, H))
     return rects
+
+def coords_to_tile_index(x: float, y: float, geometry: dict) -> Optional[int]:
+    """Maps pixel coordinates to a board tile index."""
+    img_w, img_h = geometry["resolution_px"]
+    for i, tile in enumerate(geometry["board"]["tiles"]):
+        # Convert relative tile geometry to absolute pixel coordinates
+        cx, cy, w, h = tile["cx"], tile["cy"], tile["w"], tile["h"]
+        x1 = (cx - w / 2) * img_w
+        y1 = (cy - h / 2) * img_h
+        x2 = (cx + w / 2) * img_w
+        y2 = (cy + h / 2) * img_h
+        
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            return i
+    return None
 
 def segment_digits(bin_img: np.ndarray, tmpls: Dict[str, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -630,6 +678,45 @@ def get_placement(img: ImgLike) -> int:
             return i + 1
 
     return 0 
+
+def get_roboflow_prediction(img: ImgLike) -> Tuple[Optional[str], Optional[int]]:
+    load_dotenv()
+    ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
+    if not ROBOFLOW_API_KEY:
+        print("Warning: ROBOFLOW_API_KEY not found in .env file. Skipping initial unit detection.")
+        return None, None
+
+    # Convert to PIL (or pass the NumPy RGB array directly)
+    frame_bgr = _as_bgr(img)
+
+    try:
+        client = InferenceHTTPClient(
+            api_url="https://detect.roboflow.com",
+            api_key=ROBOFLOW_API_KEY
+        )
+        result = client.infer(image=frame_bgr, model_id="merge-tactics-gqlnv/1")
+    except Exception as e:
+        print(f"Error during Roboflow inference: {e}")
+        return None, None
+
+    preds = result.get("predictions") or []
+    if not preds:
+        return None, None
+
+    p = preds[0]
+    label = CLASS_TO_LABEL.get(p.get("class", ""), p.get("class", ""))
+    x = float(p.get("x", 0))
+    y = float(p.get("y", 0))
+
+    geom = load_geometry()
+    tile_index = coords_to_tile_index(x, y, geom)
+    if tile_index is None:
+        print("Warning: could not map detection to a board tile.")
+        return None, None
+
+    print(f"Roboflow detected initial unit: {label} at tile {tile_index}")
+    return label, tile_index
+
 
 
 # CLI (quick manual test)
