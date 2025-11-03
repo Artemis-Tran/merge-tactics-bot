@@ -99,9 +99,16 @@ def validate_state(state) -> bool:
     # Two solid reads is usually enough to proceed
     return good_cards >= 2
 
-def desired_board_slots_for_round(round_num: int) -> int:
-    """Per rules: desired = round + 1, capped at logical board slots."""
-    return min(int(round_num or 0) + 1, LOGICAL_BOARD_SLOTS)
+def compute_desired_board_for_state(self, game_state) -> int:
+    # raw desired from the current round
+    round_num = int(getattr(game_state, "round", 0) or 0)
+    raw_desired = min(round_num + 1, LOGICAL_BOARD_SLOTS)
+
+    # make it monotonic for this episode
+    if raw_desired > self.max_desired_board_seen:
+        self.max_desired_board_seen = raw_desired
+
+    return self.max_desired_board_seen
 
 def logical_board_count(tracker: BoardBenchTracker) -> int:
     """How many logical board slots are currently filled (capped to 6)."""
@@ -385,6 +392,7 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.q_online.parameters(), lr=learning_rate)
         self.gamma = gamma
         self.target_tau = target_tau
+        self.max_desired_board_seen = 2
 
     @torch.no_grad()
     def act(self, state_vector: np.ndarray, epsilon: float, mask: np.ndarray) -> int:
@@ -446,6 +454,7 @@ class MergeTacticsEnv:
 
     def reset(self) -> Tuple[np.ndarray, env.GameState]:
         self.tracker = BoardBenchTracker.fresh()
+        self.max_desired_board_seen = 2
         frame = self.vision.capture_frame()
         state = env.get_state(frame)
         valid_state = validate_state(state)
@@ -611,8 +620,7 @@ class MergeTacticsEnv:
 
         # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         # Board-fill shaping: heavily incentivize having desired units on board
-        round_num = int(getattr(next_game_state, "round", 0) or 0)
-        desired_slots = desired_board_slots_for_round(round_num)
+        desired_slots = self.compute_desired_board_for_state(next_game_state)
         actual_slots  = logical_board_count(self.tracker)
 
         # Gap: how far below desired we are (never negative)
