@@ -133,7 +133,7 @@ def _slot_center(slot: Slot, geom: Dict[str, Any]) -> Tuple[int, int]:
     raise TypeError(f"Unsupported slot type: {slot}")
 
 # Public API
-def drag(src: Slot, dst: Slot, duration_ms: int = 120) -> None:
+def drag(src: Slot, dst: Slot, duration_ms: int = 280) -> None:
     """
     Drag from the center of `src` to the center of `dst` using adb_swipe.
     Dragging TO a Hand slot is interpreted by the game as 'sell'.

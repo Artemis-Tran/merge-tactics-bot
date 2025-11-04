@@ -60,9 +60,9 @@ CLASS_TO_LABEL = {
     "prince": "Prince",
     "princess": "Princess",
     "royal-ghost": "RoyalGhost",
-    "skeleton-dragon": "SkeletonDragon",
+    "skeleton-dragon": "SkeletonDragons",
     "skeleton-king": "SkeletonKing",
-    "spear-goblin": "SpearGoblin",
+    "spear-goblin": "SpearGoblins",
     "stab-goblin": "Goblins",
     "valkyrie": "Valkyrie",
     "witch": "Witch",
@@ -487,13 +487,14 @@ class _CardRecognizer:
 
 @dataclass
 class GameState:
-    mana: str
+    mana: int
     mana_conf: float
     health: int                       # {0,10,20,...,100}
     round: Optional[int]
     phase: Optional[str]                  # 'deploy' or 'battle'
     cards: List[CardMatch]                # matches for cards in hand
     game_over: bool
+    timer: Optional[int]
 
 _CARD_MODEL: _CardRecognizer | None = None
 
@@ -557,10 +558,12 @@ def read_mana(img: ImgLike) -> Tuple[int, float]:
     roi = _clean_roi(roi)
 
     text, conf = _match_digit(roi, TESS_MULTI)
-    if conf < 20:
-        text = ""
-        conf = -1
-    return int(text), conf
+
+    if conf < 20 or not text or not str(text).isdigit():
+        return 0, -1.0
+
+    val = max(0, min(20, int(text)))
+    return val, conf
 
 def read_health(img: ImgLike) -> int:
     """
@@ -601,6 +604,39 @@ def read_health(img: ImgLike) -> int:
             break
 
     return percent
+
+def read_timer_percent(img: ImgLike) -> int:
+    """
+    Estimate remaining time (0..100) from the blue timer bar.
+    Logic: scan vertical stripes from right->left; the rightmost blue stripe
+    gives the remaining fraction.
+    """
+    frame_bgr = _as_bgr(img)
+    H, W = frame_bgr.shape[:2]
+    geom = load_geometry()
+
+    # geometry.json already has a "timer" ROI (normalized full-width thin bar)
+    rx, ry, rw, rh = get_abs_rect(geom, "timer", W, H)
+    roi = _crop(frame_bgr, (rx, ry, rw, rh))
+
+    # Search from right (1.0) to left (0.0) in small steps
+    rightmost_blue_x = None
+    step = 0.02
+    x = 0.98
+    while x >= 0.0:
+        if _is_blue_stripe(roi, x_frac=x, stripe_frac=0.06,
+                           h_lo=95, h_hi=130, s_lo=120, v_lo=120,  # same blue band as health
+                           min_blue_frac=0.25):
+            rightmost_blue_x = x
+            break
+        x -= step
+
+    if rightmost_blue_x is None:
+        return 0
+    pct = int(round(rightmost_blue_x * 100))
+    if rightmost_blue_x >= 0.97:
+        pct = 100
+    return max(0, min(100, pct))
 
 def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     frame_bgr = _as_bgr(img)
@@ -647,10 +683,12 @@ def get_state(img: ImgLike) -> GameState:
     mana, mana_conf = read_mana(img)
     health = read_health(img)
     round, phase = read_round_phase(img)
+    timer = read_timer_percent(img)
     return GameState(
         mana=mana,
         mana_conf=mana_conf,
         health=health,
+        timer=timer,
         round=round,
         phase=phase,
         cards=read_cards(img),
@@ -685,36 +723,47 @@ def get_roboflow_prediction(img: ImgLike) -> Tuple[Optional[str], Optional[int]]
     if not ROBOFLOW_API_KEY:
         print("Warning: ROBOFLOW_API_KEY not found in .env file. Skipping initial unit detection.")
         return None, None
-
-    # Convert to PIL (or pass the NumPy RGB array directly)
     frame_bgr = _as_bgr(img)
 
+    # Load card data to determine melee/ranged
+    with open("cards.json", "r") as f:
+        card_data = json.load(f)
+
     try:
-        client = InferenceHTTPClient(
-            api_url="https://detect.roboflow.com",
+        CLIENT = InferenceHTTPClient(
+            api_url="https://serverless.roboflow.com",
             api_key=ROBOFLOW_API_KEY
         )
-        result = client.infer(image=frame_bgr, model_id="merge-tactics-gqlnv/1")
+        result = CLIENT.infer(frame_bgr, model_id="mtcd-board-v3-snw8t/2")
+        print("Results:", result)
     except Exception as e:
         print(f"Error during Roboflow inference: {e}")
         return None, None
 
     preds = result.get("predictions") or []
     if not preds:
+        print("No Roboflow predictions found.")
         return None, None
 
     p = preds[0]
     label = CLASS_TO_LABEL.get(p.get("class", ""), p.get("class", ""))
-    x = float(p.get("x", 0))
-    y = float(p.get("y", 0))
-
-    geom = load_geometry()
-    tile_index = coords_to_tile_index(x, y, geom)
-    if tile_index is None:
-        print("Warning: could not map detection to a board tile.")
+    if label not in card_data:
+        print(f"Warning: {label} not found in cards.json")
         return None, None
 
-    print(f"Roboflow detected initial unit: {label} at tile {tile_index}")
+    # Determine unit type (melee/ranged)
+    unit_type = card_data[label]["type"]
+
+    FRONT_ROW_MIDDLE_TILE = 2  
+    BACK_ROW_MIDDLE_TILE = 17   
+
+    if unit_type == "melee":
+        tile_index = FRONT_ROW_MIDDLE_TILE
+        print(f"Detected melee unit {label}, assigning to front-row middle tile {tile_index}.")
+    else:
+        tile_index = BACK_ROW_MIDDLE_TILE
+        print(f"Detected ranged unit {label}, assigning to back-row middle tile {tile_index}.")
+
     return label, tile_index
 
 
@@ -729,9 +778,11 @@ if __name__ == "__main__":
 
     start = time.perf_counter()   # start high-res timer
     state = get_state(args.image)
-
+    label, tile_index = get_roboflow_prediction(args.image)
+    
     print(f"Mana: {state.mana} ({state.mana_conf:.2f}% confi)")
     print(f"Health: {state.health}")
+    print(f"Timer: {getattr(state, 'timer', None)}%")
     print(f"Round: {state.round}")
     print(f"Phase: {state.phase}")
     print(f"Game over: {state.game_over}")
@@ -740,6 +791,8 @@ if __name__ == "__main__":
         if c.label:
             print(f"{c.label:15s} conf={c.conf:.2f} idx={c.idx} cost={c.cost} type={c.type} "
                 f"traits=({c.trait1}, {c.trait2}) upg={c.upgradable}")
+            
+    print(f"Label: {label}, Tile Index: {tile_index}")
     print(f"\n--- Runtime: {time.perf_counter() - start:.3f} seconds ---")
 
    

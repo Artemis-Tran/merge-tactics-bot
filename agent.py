@@ -41,6 +41,7 @@ import json
 import environment as env
 from controller import drag, Hand, Bench, Board, play_again
 from vision import Vision
+import copy
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -75,12 +76,24 @@ LOGICAL_BENCH_SLOTS = 5               # we only expose 5 bench slots
 MAX_HAND_SLOTS = 6
 
 # Action space layout
-NUM_BUY_ACTIONS = 2
+NUM_BUY_ACTIONS = 1
 NUM_SELL_BOARD_ACTIONS = LOGICAL_BOARD_SLOTS
 NUM_SELL_BENCH_ACTIONS = LOGICAL_BENCH_SLOTS
 NUM_SWAP_ACTIONS = LOGICAL_BENCH_SLOTS * LOGICAL_BOARD_SLOTS
 
-ACTION_SIZE = 1 + NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS + NUM_SWAP_ACTIONS
+NUM_MOVE_FRONT_ACTIONS = LOGICAL_BENCH_SLOTS  # move bench -> front row
+NUM_MOVE_BACK_ACTIONS  = LOGICAL_BENCH_SLOTS  # move bench -> back row
+
+ACTION_SIZE = (
+    1
+    + NUM_BUY_ACTIONS
+    + NUM_SELL_BOARD_ACTIONS
+    + NUM_SELL_BENCH_ACTIONS
+    + NUM_SWAP_ACTIONS
+    + NUM_MOVE_FRONT_ACTIONS
+    + NUM_MOVE_BACK_ACTIONS
+)
+
 
 # State size: 6 ids + 6 stars + 5 ids + 5 stars + 6 ids + 6 upg + N_TRAITS + 4 scalars (mana, health, round, net_worth)
 STATE_SIZE = (LOGICAL_BOARD_SLOTS * 2) + (LOGICAL_BENCH_SLOTS * 2) + (MAX_HAND_SLOTS * 2) + NUM_TRAITS + 4
@@ -88,27 +101,17 @@ STATE_SIZE = (LOGICAL_BOARD_SLOTS * 2) + (LOGICAL_BENCH_SLOTS * 2) + (MAX_HAND_S
 
 # State Helper
 def validate_state(state) -> bool:
-    if getattr(state, "mana_conf", 0) < 50:
+    if getattr(state, "mana_conf", 0) < 65:
         return False
 
     # Count cards with both a label and decent confidence
     good_cards = sum(
         1 for c in getattr(state, "cards", [])[:6]
-        if getattr(c, "label", None) and getattr(c, "conf", 0.0) >= 0.4
+        if getattr(c, "label", None) and getattr(c, "conf", 0.0) >= 0.7
     )
     # Two solid reads is usually enough to proceed
     return good_cards >= 2
 
-def compute_desired_board_for_state(self, game_state) -> int:
-    # raw desired from the current round
-    round_num = int(getattr(game_state, "round", 0) or 0)
-    raw_desired = min(round_num + 1, LOGICAL_BOARD_SLOTS)
-
-    # make it monotonic for this episode
-    if raw_desired > self.max_desired_board_seen:
-        self.max_desired_board_seen = raw_desired
-
-    return self.max_desired_board_seen
 
 def logical_board_count(tracker: BoardBenchTracker) -> int:
     """How many logical board slots are currently filled (capped to 6)."""
@@ -122,37 +125,115 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker) -> np
     """Returns a boolean array where True indicates a valid action."""
     mask = np.zeros(ACTION_SIZE, dtype=bool)
 
-    # Action 0: No-op is always a valid choice.
     mask[0] = True
-    
-    # --- Buy actions (indices 1, 2) ---
-    can_buy = any(getattr(c, "label", None) for c in game_state.cards)
-    if can_buy:
-        if sum(1 for s in tracker.board_stars if s > 0) < LOGICAL_BOARD_SLOTS:
-            mask[1] = True # Buy to board
-        if sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS:
-            mask[2] = True # Buy to bench
 
-    # --- Sell actions ---
+    time_left = getattr(game_state, "timer", None)
+    if isinstance(time_left, (int, float)) and time_left <= 10:
+        return mask
+
+    phase = getattr(game_state, "phase", None)
+    if not phase or phase not in ("deploy", "battle"):
+        return mask
+
+    # Index helpers
+    BUY_BENCH_IDX = 1  # since 0 is NoOp and NUM_BUY_ACTIONS == 1
+
+    sell_board_base = 1 + NUM_BUY_ACTIONS
+    sell_bench_base = sell_board_base + NUM_SELL_BOARD_ACTIONS
+    swap_base       = sell_bench_base + NUM_SELL_BENCH_ACTIONS
+    move_base       = swap_base + NUM_SWAP_ACTIONS  # front then back
+
     num_occupied_board = len(tracker.list_occupied_board_indices())
+    can_buy = any(getattr(c, "label", None) for c in game_state.cards)
+
+    if phase == "battle":
+        # --- BATTLE: Only bench-safe actions ---
+        # Buy -> Bench
+        if can_buy and sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS:
+            mask[BUY_BENCH_IDX] = True
+
+        # Sell Bench
+        for j in range(LOGICAL_BENCH_SLOTS):
+            if tracker.bench_stars[j] > 0:
+                mask[sell_bench_base + j] = True
+
+        return mask
+
+    # --- DEPLOY: bench buy is allowed; board buy is removed ---
+    if can_buy and sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS:
+        mask[BUY_BENCH_IDX] = True
+
+    # Sell Board
     for i in range(LOGICAL_BOARD_SLOTS):
         if i < num_occupied_board:
-            mask[1 + NUM_BUY_ACTIONS + i] = True
+            mask[sell_board_base + i] = True
 
-    for i in range(LOGICAL_BENCH_SLOTS):
-        if tracker.bench_stars[i] > 0:
-            mask[1 + NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + i] = True
+    # Sell Bench
+    for j in range(LOGICAL_BENCH_SLOTS):
+        if tracker.bench_stars[j] > 0:
+            mask[sell_bench_base + j] = True
 
-    # --- Swap actions ---
-    if game_state.phase == 'deploy':
-        start_idx = 1 + NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS
-        for bench_idx in range(LOGICAL_BENCH_SLOTS):
-            if tracker.bench_stars[bench_idx] > 0:
-                for board_idx in range(num_occupied_board):
-                    action_idx = start_idx + (bench_idx * LOGICAL_BOARD_SLOTS) + board_idx
-                    mask[action_idx] = True
-            
+    # Swaps (deploy only)
+    for bench_idx in range(LOGICAL_BENCH_SLOTS):
+        if tracker.bench_stars[bench_idx] > 0:
+            for board_idx in range(num_occupied_board):
+                mask[swap_base + (bench_idx * LOGICAL_BOARD_SLOTS) + board_idx] = True
+
+    # Move Bench -> Front/Back Row
+    for bench_idx in range(LOGICAL_BENCH_SLOTS):
+        if tracker.bench_stars[bench_idx] > 0:
+            # to front row
+            mask[move_base + bench_idx] = True
+            # to back row
+            mask[move_base + LOGICAL_BENCH_SLOTS + bench_idx] = True
+
     return mask
+
+
+def is_board_affecting_action(action_index: int) -> bool:
+    """
+    Returns True if the action touches the board (illegal in battle):
+      - Buy->Board
+      - Sell Board
+      - Swaps
+    Bench-only (Buy->Bench, Sell Bench) returns False.
+    """
+    if action_index <= 0:
+        return False
+    a = action_index - 1
+    # Buy actions (0: to board, 1: to bench)
+    if a < NUM_BUY_ACTIONS:
+        return False
+    a -= NUM_BUY_ACTIONS
+
+    # Sell Board
+    if a < NUM_SELL_BOARD_ACTIONS:
+        return True
+    a -= NUM_SELL_BOARD_ACTIONS
+
+    # Sell Bench
+    if a < NUM_SELL_BENCH_ACTIONS:
+        return False
+    a -= NUM_SELL_BENCH_ACTIONS
+
+    # Swaps
+    if a < NUM_SWAP_ACTIONS:
+        return True
+    a -= NUM_SWAP_ACTIONS
+
+    # Move Bench -> Front
+    if a < NUM_MOVE_FRONT_ACTIONS:
+        return True
+    a -= NUM_MOVE_FRONT_ACTIONS
+
+    # Move Bench -> Back
+    if a < NUM_MOVE_BACK_ACTIONS:
+        return True
+
+    # Fallback: unknown region
+    return False
+
+
 
 
 # -------------------------------------------------------------------
@@ -455,19 +536,19 @@ class MergeTacticsEnv:
     def reset(self) -> Tuple[np.ndarray, env.GameState]:
         self.tracker = BoardBenchTracker.fresh()
         self.max_desired_board_seen = 2
+        label, tile_index = None, None
         frame = self.vision.capture_frame()
         state = env.get_state(frame)
         valid_state = validate_state(state)
-        while not valid_state:
+        while not valid_state or not label:
             frame = self.vision.capture_frame()
             state = env.get_state(frame)
             valid_state = validate_state(state)
-
-        # Use Roboflow to get initial state
-        label, tile_index = env.get_roboflow_prediction(frame)
-        if label and tile_index is not None:
-            print(f"Roboflow predicted {label} at index {tile_index}")
-            self.tracker.set_board_tile(tile_index, label, star_level=1)
+            label, tile_index = env.get_roboflow_prediction(frame)
+        
+    
+        print(f"Roboflow predicted {label} at index {tile_index}")
+        self.tracker.set_board_tile(tile_index, label, star_level=1)
 
         game_state = env.get_state(frame)
         state_vector = vectorize_state(game_state, self.tracker)
@@ -476,6 +557,70 @@ class MergeTacticsEnv:
     # ----------------------- helpers -----------------------
     def _enumerate_board_occupied_indices(self) -> List[int]:
         return self.tracker.list_occupied_board_indices()
+    
+    def compute_desired_board_for_state(self, game_state) -> int:
+        # raw desired from the current round
+        round_num = int(getattr(game_state, "round", 0) or 0)
+        raw_desired = min(round_num + 1, LOGICAL_BOARD_SLOTS)
+
+        # make it monotonic for this episode
+        if raw_desired > self.max_desired_board_seen:
+            self.max_desired_board_seen = raw_desired
+
+        return self.max_desired_board_seen
+    
+    def _first_empty_col_in_row(self, row: int) -> Optional[int]:
+        start = row * BOARD_COLS
+        for c in range(BOARD_COLS):
+            if self.tracker.board_stars[start + c] == 0:
+                return c
+        return None
+
+    def _move_bench_to_row(self, bench_idx: int, row: int):
+        """
+        Move a bench unit to the given board row.
+        - Prefer the first empty tile in that row.
+        - If the target tile is occupied, perform a swap with that tile.
+        """
+        if not (0 <= bench_idx < LOGICAL_BENCH_SLOTS):
+            return
+        if self.tracker.bench_stars[bench_idx] == 0:
+            return
+
+        # Choose a column: first empty if available, else bench_idx % BOARD_COLS
+        col = self._first_empty_col_in_row(row)
+        if col is None:
+            col = bench_idx % BOARD_COLS
+
+        target_phys = row * BOARD_COLS + col
+
+        # Execute drag
+        drag(Bench(bench_idx), Board(row, col))
+
+        bench_label = self.tracker.bench_labels[bench_idx]
+        bench_stars = self.tracker.bench_stars[bench_idx]
+        board_label = self.tracker.board_labels[target_phys]
+        board_stars = self.tracker.board_stars[target_phys]
+
+        if board_stars > 0:
+            # Swap semantics
+            self.tracker.set_board_tile(target_phys, bench_label, bench_stars)
+            self.tracker.set_bench_slot(bench_idx, board_label, board_stars)
+            print(f"  - Moved (swap) Bench {bench_idx} ({bench_label} ★{bench_stars}) ↔ Board ({row},{col}) ({board_label} ★{board_stars})")
+        else:
+            # Simple move
+            self.tracker.set_board_tile(target_phys, bench_label, bench_stars)
+            self.tracker.clear_bench_slot(bench_idx)
+            print(f"  - Moved Bench {bench_idx} ({bench_label} ★{bench_stars}) → Board ({row},{col})")
+
+    def _move_bench_to_front(self, bench_idx: int):
+        """Move a bench unit to the front row (row 0)."""
+        self._move_bench_to_row(bench_idx, row=0)
+
+    def _move_bench_to_back(self, bench_idx: int):
+        """Move a bench unit to the back row (row 3)."""
+        self._move_bench_to_row(bench_idx, row=BOARD_ROWS - 1)
+
 
     def _map_logical_board_slot_to_physical_index(self, logical_index: int) -> Optional[int]:
         occupied = self._enumerate_board_occupied_indices()
@@ -511,7 +656,7 @@ class MergeTacticsEnv:
         drag(Bench(bench_slot), Hand(0))
         self.tracker.clear_bench_slot(bench_slot)
 
-    def _buy_from_hand(self, hand_index: int, card: env.Card, to_board: bool) -> bool:
+    def _buy_from_hand(self, hand_index: int, card: env.Card, to_board: bool = False) -> bool:
         """Handles buying a card to board or bench, with merge logic."""
         merged = False
         if getattr(card, "upgradable", False) and card.label:
@@ -565,22 +710,29 @@ class MergeTacticsEnv:
         """
         Executes an action and observes the next state and reward.
         """
+        # Snapshot tracker so we can roll back if UI didn't commit the action.
+        tracker_snapshot = copy.deepcopy(self.tracker)
+        pre_state_vector = vectorize_state(last_game_state, self.tracker)
+
         merged = False
+        last_phase = getattr(last_game_state, "phase", None)
+        if last_phase == "battle" and is_board_affecting_action(action_index):
+            print(f"[step] Phase=battle → blocking board-affecting action {action_index}; NoOp instead")
+            action_index = 0
         action_desc = "NoOp"
 
         # --- Action Decoding ---
         if action_index == 0:
             pass  # Action 0 is No-op
         else:
-            action = action_index - 1 # De-offset to match original logic
-            if action < NUM_BUY_ACTIONS: # Buy actions
+            action = action_index - 1 
+            if action < NUM_BUY_ACTIONS:  # Only: Buy -> Bench
                 hand_index = self._first_nonempty_hand_index(last_game_state)
                 if hand_index is not None:
                     card = last_game_state.cards[hand_index]
                     if getattr(card, "label", None) and getattr(card, "cost", 0) <= getattr(last_game_state, "mana", 0):
-                        to_board = (action == 0)
-                        action_desc = f"Buy {card.label} to {"Board" if to_board else "Bench"}"
-                        merged = self._buy_from_hand(hand_index, card, to_board)
+                        action_desc = f"Buy {card.label} to Bench"
+                        merged = self._buy_from_hand(hand_index, card)
 
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS:
                 board_slot = action - NUM_BUY_ACTIONS
@@ -591,20 +743,95 @@ class MergeTacticsEnv:
                 bench_slot = action - (NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS)
                 action_desc = f"Sell Bench Slot {bench_slot}"
                 self._sell_bench_slot(bench_slot)
-
-            else: # Swap actions
-                base_idx = action - (NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS)
-                bench_idx = base_idx // LOGICAL_BOARD_SLOTS
-                board_idx = base_idx % LOGICAL_BOARD_SLOTS
-                action_desc = f"Swap Bench {bench_idx} with Board {board_idx}"
-                self._swap_units(bench_idx, board_idx)
+            elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS + NUM_SWAP_ACTIONS:
+                tmp = action - (NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS)
+                bench_idx = tmp // LOGICAL_BOARD_SLOTS
+                board_logical_idx = tmp % LOGICAL_BOARD_SLOTS
+                action_desc = f"Swap Bench {bench_idx} ↔ Board {board_logical_idx}"
+                self._swap_units(bench_idx, board_logical_idx)
+            else:
+                # New movement actions region
+                base_idx = action - (
+                    NUM_BUY_ACTIONS
+                    + NUM_SELL_BOARD_ACTIONS
+                    + NUM_SELL_BENCH_ACTIONS
+                    + NUM_SWAP_ACTIONS
+                )
+                if base_idx < NUM_MOVE_FRONT_ACTIONS:
+                    bench_idx = base_idx
+                    action_desc = f"Move Bench {bench_idx} → Front Row"
+                    self._move_bench_to_front(bench_idx)
+                else:
+                    base_idx -= NUM_MOVE_FRONT_ACTIONS
+                    if base_idx < NUM_MOVE_BACK_ACTIONS:
+                        bench_idx = base_idx
+                        action_desc = f"Move Bench {bench_idx} → Back Row"
+                        self._move_bench_to_back(bench_idx)
+                    else:
+                        # Safety fallback (shouldn't happen)
+                        action_desc = "NoOp (unknown action region)"
 
         print(f"Action: {action_desc}")
 
         # Observe next state
-        time.sleep(0.2) # Allow UI to update
+        time.sleep(0.4) # Allow UI to update
         frame = self.vision.capture_frame()
         next_game_state = env.get_state(frame)
+        phase = getattr(next_game_state, "phase", None)
+        mana_conf = getattr(next_game_state, "mana_conf", 0.0)
+        game_over  = bool(getattr(next_game_state, "game_over", False))
+
+        if (mana_conf < 75) and (not game_over):
+            print("[step] rolling back tracker and treating as NoOp.")
+            self.tracker = tracker_snapshot
+            return pre_state_vector, last_game_state, 0.0, False, {"rolled_back": True}
+
+        occupied_board = [
+            (idx, self.tracker.board_labels[idx], self.tracker.board_stars[idx])
+            for idx in range(BOARD_TILES)
+            if self.tracker.board_stars[idx] > 0
+        ]
+        occupied_bench = [
+            (j, self.tracker.bench_labels[j], self.tracker.bench_stars[j])
+            for j in range(LOGICAL_BENCH_SLOTS)
+            if self.tracker.bench_stars[j] > 0
+        ]
+
+        print("\n[Tracker State]")
+        print("  Board occupied tiles:")
+        if occupied_board:
+            for idx, label, stars in occupied_board:
+                row, col = divmod(idx, BOARD_COLS)
+                print(f"    - ({row},{col}) idx={idx}: {label or 'None'} ★{stars}")
+        else:
+            print("    (empty)")
+
+        print("  Bench occupied slots:")
+        if occupied_bench:
+            for j, label, stars in occupied_bench:
+                print(f"    - slot {j}: {label or 'None'} ★{stars}")
+        else:
+            print("    (empty)")
+        print("-------------------------------------------------------------------")
+
+        # --- Trait State Tracking -------------------------------------------------
+        trait_counts = {trait: 0 for trait in ALL_TRAITS}
+        for label in self.tracker.board_labels:
+            if label in CARD_TRAITS:
+                for t in CARD_TRAITS[label]:
+                    if t in trait_counts:
+                        trait_counts[t] += 1
+
+        print("  Active Traits:")
+        active_any = False
+        for trait, count in trait_counts.items():
+            if count > 0:
+                active_any = True
+                level = "Level 2" if count >= 4 else "Level 1" if count >= 2 else "Base"
+                print(f"    - {trait}: {count} ({level})")
+        if not active_any:
+            print("    (none)")
+        print("===================================================================\n")
 
         # --- Reward Shaping ---
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
@@ -614,9 +841,9 @@ class MergeTacticsEnv:
         value_reward = 0.005 * total_unit_value
 
         # Reward for executing a merge
-        merge_reward = 0.25 if merged else 0.0
+        merge_reward = 1 if merged else 0.0
         if merged:
-            print("  - MERGE DETECTED! +0.25 reward")
+            print("  - MERGE DETECTED! +1 reward")
 
         # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         # Board-fill shaping: heavily incentivize having desired units on board
@@ -628,17 +855,12 @@ class MergeTacticsEnv:
 
         # Heavier weight during battle; lighter during deploy so agent preps early
         phase = getattr(next_game_state, "phase", None)
-        phase_weight = 1.75 if phase == "battle" else 0.35
+        board_fill_reward = 0.0
 
-        # Continuous penalty for being under desired; small nudge to not exceed desired
-        board_fill_reward = -(phase_weight * underfill)
-        if actual_slots > desired_slots:
-            board_fill_reward -= 0.1 * (actual_slots - desired_slots)  # mild discourage
-
-        # Extra kick exactly at deploy->battle transition:
-        if getattr(last_game_state, "phase", None) == "deploy" and phase == "battle":
-            # If we hit battle at/above target → big bonus; if we missed → big penalty
-            board_fill_reward += (3.0 if underfill == 0 else -3.0 - 0.75 * underfill)
+        if phase == "battle":
+            desired_units = max(self.tracker.max_seen_units, 5)
+            board_units = len(self.tracker.list_occupied_board_indices())
+            board_fill_reward = -0.35 * (desired_units - board_units)
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         step_reward = mana_reward + value_reward + merge_reward + board_fill_reward
@@ -648,7 +870,7 @@ class MergeTacticsEnv:
             f"BoardFill: {board_fill_reward:.3f} | desired={desired_slots}, actual={actual_slots}, phase={phase})"
         )
 
-        done_flag = bool(getattr(next_game_state, "game_over", False))
+        done_flag = game_over
         placement_value = None
         if done_flag:
             time.sleep(0.3)
@@ -658,11 +880,12 @@ class MergeTacticsEnv:
             
             terminal_reward = 0
             if placement_value == 1:
-                terminal_reward = 10.0
+                terminal_reward = 50.0
             elif placement_value == 2:
-                terminal_reward = 4.0
-            elif placement_value == 3:
-                terminal_reward = 2.0
+                terminal_reward = 25.0
+            elif placement_value == 4:
+                terminal_reward = -50.0
+    
             
             step_reward += terminal_reward + (0.1 * current_mana)
             print(f"  - GAME OVER! Placement: {placement_value}, Final Reward: {step_reward:.3f}")
@@ -708,16 +931,15 @@ def train(episodes: int = 3,
 
             if action_index == -1:
                 print("No valid actions. Skipping step.")
-                # Get next state without taking an action
-                frame = vision.capture_frame()
-                next_game_state = env.get_state(frame)
-                next_state_vector = vectorize_state(next_game_state, env_wrapper.tracker)
-                reward_value = 0.0 # Neutral reward for waiting
-                done_flag = bool(getattr(next_game_state, "game_over", False))
-                info = {}
+                continue
             else:
                 next_state_vector, next_game_state, reward_value, done_flag, info = env_wrapper.step(action_index, game_state)
 
+            if info.get("rolled_back"):
+                # Treat as if nothing happened this tick.
+                state_vector, game_state = next_state_vector, next_game_state  # these equal pre-action values
+                print("[train] Rolled back step; not recording transition.")
+                continue
             replay_buffer.push(Transition(state_vector=state_vector,
                                           action_index=action_index,
                                           reward_value=reward_value,

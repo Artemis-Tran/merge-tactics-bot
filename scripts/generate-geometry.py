@@ -211,6 +211,8 @@ def main():
 
     health_roi = {"x": 0.79, "y": 0.68, "w": 0.115, "h": 0.005}
 
+    timer_bar_roi = {"x": 0.0, "y": 0.99, "w": 1.0, "h": 0.01}
+
     # cost ROI relative to each hand box (top-left corner of the card)
     # tweak these if your card design differs:
     # x,y,w,h are relative to the hand card rectangle (0..1, origin at hand box top-left)
@@ -245,6 +247,7 @@ def main():
         "mana": mana_roi,
         "health": health_roi,
         "round_phase": round_phase_roi,
+        "timer": timer_bar_roi,
     }
 
     out_json = Path("../geometry.json")
@@ -307,6 +310,10 @@ def main():
     # draw health
     hx, hy, hw, hh = to_abs_rect(health_roi, W, H)
     draw_labeled_rect(overlay, (hx, hy, hw, hh), (255, 50, 50), "HEALTH")
+
+    # draw health
+    hx, hy, hw, hh = to_abs_rect(timer_bar_roi, W, H)
+    draw_labeled_rect(overlay, (hx, hy, hw, hh), (255, 250, 50), "TIMER")
 
     out_dir = args.out_dir
     out_overlay = out_dir / "annotated_geometry_overlay.png"
