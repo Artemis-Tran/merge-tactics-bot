@@ -976,7 +976,7 @@ def train(episodes: int = 3,
                     time.sleep(1)
                     while not env.is_home_screen:
                         start_battle()
-
+                start_battle()
                 # Poll until the game state is valid again
                 print("Waiting for new game to start...")
                 while True:
