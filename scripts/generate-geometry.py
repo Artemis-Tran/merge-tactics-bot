@@ -330,6 +330,13 @@ def main():
         raise RuntimeError(f"Could not load image: {args.img}")
     
     H, W = bgr.shape[:2]
+    ok_roi = {"x": 0.335, "y": 0.89, "w": 0.33, "h": 0.06}
+    ok_center_roi = {
+        "cx": ok_roi["x"] + ok_roi["w"] / 2, 
+        "cy": ok_roi["y"] + ok_roi["h"] / 2,  
+        "w": ok_roi["w"],
+        "h": ok_roi["h"],
+    }
 
     play_again_roi = {"x": 0.15, "y": 0.89, "w": 0.33, "h": 0.06}
     play_again_center_roi = {
@@ -364,15 +371,14 @@ def main():
         r["player_check"] = player_check
         placement_rois.append(r)
 
-
-    
-
     geometry = {
         "image_basis": "end-screen.png",
         "resolution_px": [W, H],
         "placement": placement_rois,
         "play_again": play_again_roi,
-        "play_again_center": play_again_center_roi
+        "play_again_center": play_again_center_roi,
+        "ok": ok_roi,
+        "ok_center": ok_center_roi,
     }
 
     out_json = Path("../end-screen-geometry.json")
@@ -380,6 +386,10 @@ def main():
         json.dump(geometry, f, indent=2)
 
     overlay = bgr.copy()
+
+    # draw ok roi
+    px, py, pw, ph = to_abs_rect(ok_roi, W, H)
+    draw_labeled_rect(overlay, (px, py, pw, ph), (200, 0, 200), "OK")
 
     # draw play again roi
     px, py, pw, ph = to_abs_rect(play_again_roi, W, H)
@@ -395,6 +405,43 @@ def main():
         draw_labeled_rect(overlay, (cx, cy, cw, ch), (0, 255, 0), f"CHECK {i+1}")
 
     out_overlay =  "../assets/screenshots/annotated_end_screen_geometry_overlay.png"
+    ok = cv2.imwrite(str(out_overlay), overlay)
+
+    print(f"Saved geometry.json in: {out_json.resolve()}")
+    print(f"Saved overlay PNG in:  {out_overlay}")
+
+    # --- Home screen geometry --- 
+    bgr = cv2.imread("../assets/screenshots/home-screen.png")
+    if bgr is None:
+        raise RuntimeError(f"Could not load image: {args.img}")
+    
+    H, W = bgr.shape[:2]
+
+    battle_roi = {"x": 0.335, "y": 0.73, "w": 0.33, "h": 0.1}
+    battle_center_roi = {
+        "cx": battle_roi["x"] + battle_roi["w"] / 2, 
+        "cy": battle_roi["y"] + battle_roi["h"] / 2,  
+        "w": battle_roi["w"],
+        "h": battle_roi["h"],
+    }
+
+    geometry = {
+        "image_basis": "home-screen.png",
+        "resolution_px": [W, H],
+        "battle_button": battle_roi,
+        "battle_button_center": battle_center_roi,
+    }
+    out_json = Path("../home-screen-geometry.json")
+    with open(out_json, "w") as f:
+        json.dump(geometry, f, indent=2)
+
+    overlay = bgr.copy()
+
+    # Draw battle button
+    px, py, pw, ph = to_abs_rect(battle_roi, W, H)
+    draw_labeled_rect(overlay, (px, py, pw, ph), (200, 0, 200), "battle")
+
+    out_overlay =  "../assets/screenshots/annotated_home_screen_geometry_overlay.png"
     ok = cv2.imwrite(str(out_overlay), overlay)
 
     print(f"Saved geometry.json in: {out_json.resolve()}")

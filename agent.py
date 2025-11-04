@@ -39,7 +39,7 @@ import torch.optim as optim
 import json
 
 import environment as env
-from controller import drag, Hand, Bench, Board, play_again
+from controller import drag, Hand, Bench, Board, play_again, return_home, start_battle
 from vision import Vision
 import copy
 
@@ -779,7 +779,7 @@ class MergeTacticsEnv:
         next_game_state = env.get_state(frame)
         phase = getattr(next_game_state, "phase", None)
         mana_conf = getattr(next_game_state, "mana_conf", 0.0)
-        game_over  = bool(getattr(next_game_state, "game_over", False))
+        game_over, will_play_again  = getattr(next_game_state, "game_over", (False, False))
 
         if (mana_conf < 75) and (not game_over):
             print("[step] rolling back tracker and treating as NoOp.")
@@ -856,11 +856,16 @@ class MergeTacticsEnv:
         # Heavier weight during battle; lighter during deploy so agent preps early
         phase = getattr(next_game_state, "phase", None)
         board_fill_reward = 0.0
-
         if phase == "battle":
-            desired_units = max(self.tracker.max_seen_units, 5)
-            board_units = len(self.tracker.list_occupied_board_indices())
-            board_fill_reward = -0.35 * (desired_units - board_units)
+            desired_slots = self.compute_desired_board_for_state(next_game_state)
+            desired_slots = max(0, min(desired_slots, LOGICAL_BOARD_SLOTS))
+
+            actual_slots = logical_board_count(self.tracker) 
+
+            underfill = max(0, desired_slots - actual_slots)
+
+            BOARD_UNDERFILL_WEIGHT = 0.35
+            board_fill_reward = -BOARD_UNDERFILL_WEIGHT * float(underfill)
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         step_reward = mana_reward + value_reward + merge_reward + board_fill_reward
@@ -891,7 +896,7 @@ class MergeTacticsEnv:
             print(f"  - GAME OVER! Placement: {placement_value}, Final Reward: {step_reward:.3f}")
 
         next_state_vector = vectorize_state(next_game_state, self.tracker)
-        info = {"placement": placement_value}
+        info = {"placement": placement_value, "play_again": bool(will_play_again)}
         return next_state_vector, next_game_state, float(step_reward), done_flag, info
 
 # -------------------------------------------------------------------
@@ -964,7 +969,13 @@ def train(episodes: int = 3,
                 
                 # Click play again and wait for the game to reset.
                 time.sleep(2)
-                play_again()
+                if info.get("play_again", False):
+                    play_again()
+                else:
+                    return_home()
+                    time.sleep(1)
+                    while not env.is_home_screen:
+                        start_battle()
 
                 # Poll until the game state is valid again
                 print("Waiting for new game to start...")
@@ -983,9 +994,11 @@ def train(episodes: int = 3,
 # -------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=50, help="Number of games to play.")
+    parser.add_argument("--episodes", type=int, default=300, help="Number of games to play.")
     args = parser.parse_args()
     print(f"Training for {args.episodes} episodes. Use --episodes to change this.")
+    start_battle()
+    print("Starting battle")
     train(episodes=args.episodes)
 
 if __name__ == "__main__":

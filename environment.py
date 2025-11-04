@@ -31,6 +31,7 @@ from inference_sdk import InferenceHTTPClient
 
 GEOM_PATH = Path("geometry.json")
 END_GEOM_PATH = Path("end-screen-geometry.json")
+HOME_GEOM_PATH = Path("home-screen-geometry.json")
 TEMPLATES_DIR = Path("assets/templates")
 RUNS_DIR = Path("runs") / "vision"
 CARD_REFS_DIR = Path("assets/cards")  
@@ -662,7 +663,7 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
         result = (None, None)
     return result
 
-def is_game_over(img: ImgLike) -> bool:
+def is_game_over(img: ImgLike) -> Tuple[bool, bool]:
     frame_bgr = _as_bgr(img)
     H, W = frame_bgr.shape[:2]
     geom = load_geometry(END_GEOM_PATH)
@@ -675,8 +676,19 @@ def is_game_over(img: ImgLike) -> bool:
 
     template = cv2.imread("assets/templates/play_again.png", cv2.IMREAD_GRAYSCALE)
     score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
-    return score > 0.6
+    if score > 0.6:
+        return True, True
+    
+    rx, ry, rw, rh = get_abs_rect(geom, "ok", W, H)
 
+    roi = _crop(frame_bgr, (rx, ry, rw, rh))
+    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0, 0, 230), (180, 40, 255)) 
+    res = 255 - mask
+
+    template = cv2.imread("assets/templates/ok.png", cv2.IMREAD_GRAYSCALE)
+    score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
+    return score > 0.6, False
 
 
 def get_state(img: ImgLike) -> GameState:
@@ -695,6 +707,21 @@ def get_state(img: ImgLike) -> GameState:
         game_over=is_game_over(img)
     )
 
+
+def is_home_screen(img: ImgLike) -> bool:
+    frame_bgr = _as_bgr(img)
+    H, W = frame_bgr.shape[:2]
+    geom = load_geometry(HOME_GEOM_PATH)
+    rx, ry, rw, rh = get_abs_rect(geom, "battle_button", W, H)
+
+    roi = _crop(frame_bgr, (rx, ry, rw, rh))
+    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0, 0, 230), (180, 40, 255)) 
+    res = 255 - mask
+    
+    template = cv2.imread("assets/templates/battle.png", cv2.IMREAD_GRAYSCALE)
+    score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
+    return score > 0.6
    
 def get_placement(img: ImgLike) -> int:
     frame_bgr = _as_bgr(img)
@@ -778,21 +805,23 @@ if __name__ == "__main__":
 
     start = time.perf_counter()   # start high-res timer
     state = get_state(args.image)
-    label, tile_index = get_roboflow_prediction(args.image)
+    is_home = is_home_screen(args.image)
+    # label, tile_index = get_roboflow_prediction(args.image)
     
     print(f"Mana: {state.mana} ({state.mana_conf:.2f}% confi)")
     print(f"Health: {state.health}")
     print(f"Timer: {getattr(state, 'timer', None)}%")
     print(f"Round: {state.round}")
     print(f"Phase: {state.phase}")
-    print(f"Game over: {state.game_over}")
+    print(f"Game over: {state.game_over[0]} Play Again: {state.game_over[1]}")
 
     for c in state.cards:
         if c.label:
             print(f"{c.label:15s} conf={c.conf:.2f} idx={c.idx} cost={c.cost} type={c.type} "
                 f"traits=({c.trait1}, {c.trait2}) upg={c.upgradable}")
             
-    print(f"Label: {label}, Tile Index: {tile_index}")
+    # print(f"Label: {label}, Tile Index: {tile_index}")
+    print(f"Is Home Screen: {is_home}")
     print(f"\n--- Runtime: {time.perf_counter() - start:.3f} seconds ---")
 
    

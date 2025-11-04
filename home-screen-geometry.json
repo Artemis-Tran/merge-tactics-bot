@@ -1,0 +1,19 @@
+{
+  "image_basis": "home-screen.png",
+  "resolution_px": [
+    720,
+    1280
+  ],
+  "battle_button": {
+    "x": 0.335,
+    "y": 0.73,
+    "w": 0.33,
+    "h": 0.1
+  },
+  "battle_button_center": {
+    "cx": 0.5,
+    "cy": 0.78,
+    "w": 0.33,
+    "h": 0.1
+  }
+}

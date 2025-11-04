@@ -31,6 +31,7 @@ from adb_wrap import adb_swipe, adb_tap
 # Geometry / config paths
 GEOM_PATH = Path("geometry.json")
 END_GEOM_PATH = Path("end-screen-geometry.json")
+HOME_GEOM_PATH = Path("home-screen-geometry.json")
 
 # Slot types
 @dataclass(frozen=True)
@@ -92,6 +93,18 @@ def _slot_center(slot: Slot, geom: Dict[str, Any]) -> Tuple[int, int]:
                 raise ValueError("geometry.json missing 'Play Again' object")
             center = _center_wh_to_rect_px(button["cx"], button["cy"], button["w"], button["h"], W, H)
             return _rect_center(center)
+        elif slot.type == "return_home":
+            button = geom.get("ok_center") 
+            if not isinstance(button, dict):
+                raise ValueError("geometry.json missing 'OK' object")
+            center = _center_wh_to_rect_px(button["cx"], button["cy"], button["w"], button["h"], W, H)
+            return _rect_center(center)
+        elif slot.type == "start_battle":
+            button = geom.get("battle_button_center")
+            if not isinstance(button, dict):
+                raise ValueError("geometry.json missing 'battle button' object")
+            center = _center_wh_to_rect_px(button["cx"], button["cy"], button["w"], button["h"], W, H)
+            return _rect_center(center)
         
         raise ValueError(f"Unsupported button type: {slot.type}")
 
@@ -151,6 +164,16 @@ def quick_buy(hand: Hand) -> None:
 def play_again() -> None:
     geom = _load_geom(END_GEOM_PATH)
     x1, y1 = _slot_center(Button("play_again"), geom)
+    adb_tap(x1, y1)
+
+def return_home() -> None:
+    geom = _load_geom(END_GEOM_PATH)
+    x1, y1 = _slot_center(Button("return_home"), geom)
+    adb_tap(x1, y1)
+
+def start_battle():
+    geom = _load_geom(HOME_GEOM_PATH)
+    x1, y1 = _slot_center(Button("start_battle"), geom)
     adb_tap(x1, y1)
 
 
