@@ -910,9 +910,23 @@ def train(episodes: int = 3,
           train_every_steps: int = 8,
           epsilon_start: float = 0.9,
           epsilon_final: float = 0.05,
-          epsilon_decay_steps: int = 10_000):
+          epsilon_decay_steps: int = 10_000,
+          weights=None, eval_mode=False):
 
     agent = DQNAgent(STATE_SIZE, ACTION_SIZE)
+    if weights:
+        print(f"[load] Loading weights from {weights}")
+        ckpt = torch.load(weights, map_location=DEVICE)
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            agent.q_online.load_state_dict(ckpt["model"])
+        else:
+            agent.q_online.load_state_dict(ckpt)
+        agent.q_target.load_state_dict(agent.q_online.state_dict())
+        print("[load] Model loaded successfully.")
+    if eval_mode:
+        agent.q_online.eval()
+        epsilon_start = 0.0
+        epsilon_final = 0.0
     replay_buffer = ReplayBuffer(replay_capacity)
     vision = Vision()
     env_wrapper = MergeTacticsEnv(vision=vision, tracker=BoardBenchTracker.fresh())
@@ -945,19 +959,22 @@ def train(episodes: int = 3,
                 state_vector, game_state = next_state_vector, next_game_state  # these equal pre-action values
                 print("[train] Rolled back step; not recording transition.")
                 continue
-            replay_buffer.push(Transition(state_vector=state_vector,
-                                          action_index=action_index,
-                                          reward_value=reward_value,
-                                          next_state_vector=next_state_vector,
-                                          done_flag=done_flag))
+
             episode_return += reward_value
             state_vector, game_state = next_state_vector, next_game_state
+            if not eval_mode:
+                replay_buffer.push(Transition(state_vector=state_vector,
+                                            action_index=action_index,
+                                            reward_value=reward_value,
+                                            next_state_vector=next_state_vector,
+                                            done_flag=done_flag))
+                
 
-            if len(replay_buffer) >= start_training_after and global_step_counter % train_every_steps == 0:
-                print(f"  - Training step {global_step_counter}...", end="")
-                batch = replay_buffer.sample(batch_size)
-                loss_value = agent.train_step(batch)
-                print(f" Loss: {loss_value:.4f}")
+                if len(replay_buffer) >= start_training_after and global_step_counter % train_every_steps == 0:
+                    print(f"  - Training step {global_step_counter}...", end="")
+                    batch = replay_buffer.sample(batch_size)
+                    loss_value = agent.train_step(batch)
+                    print(f" Loss: {loss_value:.4f}")
 
             global_step_counter += 1
             if done_flag:
@@ -987,19 +1004,22 @@ def train(episodes: int = 3,
                         break
                 break
 
-    torch.save(agent.q_online.state_dict(), "dqn_merge_tactics.pt")
-    print("[ok] Saved model to dqn_merge_tactics.pt")
+    if not eval_mode:
+        torch.save(agent.q_online.state_dict(), "dqn_merge_tactics.pt")
+        print("[ok] Saved model to dqn_merge_tactics.pt")
 
 
 # -------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=300, help="Number of games to play.")
+    parser.add_argument("--weights", type=str, default=None, help="Path to dqn_merge_tactics.pt")
+    parser.add_argument("--eval", action="store_true", help="Run in evaluation (no training) mode")
     args = parser.parse_args()
     print(f"Training for {args.episodes} episodes. Use --episodes to change this.")
     start_battle()
     print("Starting battle")
-    train(episodes=args.episodes)
+    train(episodes=args.episodes, weights=args.weights, eval_mode=args.eval)
 
 if __name__ == "__main__":
     main()
