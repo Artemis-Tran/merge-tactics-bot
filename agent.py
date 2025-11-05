@@ -567,6 +567,9 @@ class MergeTacticsEnv:
     def _enumerate_board_occupied_indices(self) -> List[int]:
         return self.tracker.list_occupied_board_indices()
     
+    def _bench_is_full(self) -> bool:
+        return sum(1 for s in self.tracker.bench_stars if s > 0) >= LOGICAL_BENCH_SLOTS
+    
     def compute_desired_board_for_state(self, game_state) -> int:
         # raw desired from the current round
         round_num = int(getattr(game_state, "round", 0) or 0)
@@ -722,6 +725,9 @@ class MergeTacticsEnv:
         # Snapshot tracker so we can roll back if UI didn't commit the action.
         tracker_snapshot = copy.deepcopy(self.tracker)
         pre_state_vector = vectorize_state(last_game_state, self.tracker)
+
+        bench_full_pre = self._bench_is_full()
+        sold_one_star = False
         
         prev_mana = int(getattr(last_game_state, "mana", 0.0) or 0.0)
         prev_total_unit_value, _ = calculate_net_worth(tracker_snapshot, 0)
@@ -748,11 +754,17 @@ class MergeTacticsEnv:
 
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS:
                 board_slot = action - NUM_BUY_ACTIONS
+                # Look up the physical tile to read stars BEFORE we sell
+                phys = self._map_logical_board_slot_to_physical_index(board_slot)
+                stars_pre = self.tracker.board_stars[phys] if phys is not None else 0
+                sold_one_star = (stars_pre == 1)
                 action_desc = f"Sell Board Slot {board_slot}"
                 self._sell_board_slot(board_slot)
 
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS:
                 bench_slot = action - (NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS)
+                stars_pre = self.tracker.bench_stars[bench_slot] if 0 <= bench_slot < LOGICAL_BENCH_SLOTS else 0
+                sold_one_star = (stars_pre == 1)
                 action_desc = f"Sell Bench Slot {bench_slot}"
                 self._sell_bench_slot(bench_slot)
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS + NUM_SWAP_ACTIONS:
@@ -888,8 +900,14 @@ class MergeTacticsEnv:
             BOARD_UNDERFILL_WEIGHT = 0.4
             board_fill_reward = -BOARD_UNDERFILL_WEIGHT * float(underfill)
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        
 
         step_reward = networth_reward + merge_reward + board_fill_reward + tick_penalty
+
+        SELL_1STAR_PENALTY = -2
+        if sold_one_star and not bench_full_pre:
+            step_reward += SELL_1STAR_PENALTY
+
         print(
             f"  - Reward: {step_reward:.3f} "
             f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
