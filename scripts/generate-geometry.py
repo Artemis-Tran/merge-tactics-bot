@@ -219,7 +219,7 @@ def main():
     # x,y,w,h are relative to the hand card rectangle (0..1, origin at hand box top-left)
     cost_roi_rel = {"x": -0.05, "y": -0.065, "w": 0.22, "h": 0.17}
 
-    upgrade_arrow_rel = {"x": 0.82, "y": -0.065, "w": 0.22, "h": 0.17}
+    upgrade_arrow_rel = {"x": 0.86, "y": 0, "w": 0.1, "h": 0.1}
 
     hand = []
     for xc in hand_centers_x:
