@@ -878,7 +878,7 @@ class MergeTacticsEnv:
         done_flag = game_over
         placement_value = None
         if done_flag:
-            time.sleep(0.3)
+            time.sleep(1)
             end_frame = self.vision.capture_frame()
             placement = env.get_placement(end_frame)
             placement_value = int(placement) if placement else 8
