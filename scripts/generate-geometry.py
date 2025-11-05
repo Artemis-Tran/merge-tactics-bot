@@ -207,7 +207,8 @@ def main():
     hand_y = 0.928
     hand_w, hand_h = 0.14, 0.10
 
-    round_phase_roi = {"x": 0.02, "y": 0.11, "w": 0.20, "h": 0.05}
+    round_roi = {"x": 0.133, "y": 0.113, "w": 0.05, "h": 0.026}
+    phase_roi = {"x": 0.02, "y": 0.135, "w": 0.20, "h": 0.026}
 
     health_roi = {"x": 0.79, "y": 0.68, "w": 0.115, "h": 0.005}
 
@@ -246,7 +247,8 @@ def main():
         "hand": hand,
         "mana": mana_roi,
         "health": health_roi,
-        "round_phase": round_phase_roi,
+        "round": round_roi,
+        "phase": phase_roi,
         "timer": timer_bar_roi,
     }
 
@@ -304,8 +306,11 @@ def main():
     draw_labeled_rect(overlay, (mx, my, mw_, mh_), (0, 255, 255), "MANA")
 
     # draw round phase
-    rx, ry, rw, rh = to_abs_rect(round_phase_roi, W, H)
-    draw_labeled_rect(overlay, (rx, ry, rw, rh), (50, 255, 50), "ROUND/PHASE")
+    rx, ry, rw, rh = to_abs_rect(round_roi, W, H)
+    draw_labeled_rect(overlay, (rx, ry, rw, rh), (50, 255, 50), "ROUND")
+
+    rx, ry, rw, rh = to_abs_rect(phase_roi, W, H)
+    draw_labeled_rect(overlay, (rx, ry, rw, rh), (50, 255, 250), "PHASE")
 
     # draw health
     hx, hy, hw, hh = to_abs_rect(health_roi, W, H)

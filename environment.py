@@ -40,6 +40,12 @@ _CARD_INFO: dict[str, dict] | None = None
 _TMPL_CACHE: Optional[Dict[int, np.ndarray]] = None
 TESS_MULTI  = "--psm 10  --oem 1 -c tessedit_char_whitelist=0123456789"
 
+TEMPLATE_0_PATH = os.path.join("assets", "templates", "0.png")
+TEMPLATE_0 = cv2.imread(TEMPLATE_0_PATH, cv2.IMREAD_GRAYSCALE)
+
+if TEMPLATE_0 is None:
+    raise FileNotFoundError(f"Could not load template at {TEMPLATE_0_PATH}")
+
 # Roboflow class name to game label mapping
 CLASS_TO_LABEL = {
     "archer": "Archers",
@@ -96,6 +102,32 @@ def load_card_info(path: Path = CARDS_INFO_PATH) -> dict:
             _CARD_INFO = json.load(f)
     return _CARD_INFO
 
+def tight_bbox_black_on_white(img: np.ndarray):
+    g = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    fg = (g < 128).astype(np.uint8)
+    ys, xs = np.where(fg > 0)
+    if xs.size == 0 or ys.size == 0:
+        return 0, 1, 0, 1
+    return ys.min(), ys.max()+1, xs.min(), xs.max()+1
+
+def pad_to_match_template_bbox(digit_img: np.ndarray, template_img: np.ndarray):
+    Ht, Wt = template_img.shape[:2]
+    y0t, y1t, x0t, x1t = tight_bbox_black_on_white(template_img)
+    y0, y1, x0, x1 = tight_bbox_black_on_white(digit_img)
+    crop = digit_img[y0:y1, x0:x1]
+
+    h, w = crop.shape
+    target_h, target_w = y1t - y0t, x1t - x0t
+    scale = min(target_h / max(1, h), target_w / max(1, w))
+    nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+    resized = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_AREA)
+
+    canvas = np.full((Ht, Wt), 255, np.uint8)
+    y_off = y0t + (target_h - nh)//2
+    x_off = x0t + (target_w - nw)//2
+    canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
+    return canvas
+
 def _to_abs_rect(norm_rect: Tuple[float,float,float,float], W: int, H: int) -> Tuple[int,int,int,int]:
     x,y,w,h = norm_rect
     return (int(x*W), int(y*H), int(w*W), int(h*H))
@@ -105,7 +137,7 @@ def _crop(img: np.ndarray, rect: Tuple[int,int,int,int]) -> np.ndarray:
     x,y,w,h = rect
     return img[max(0,y):y+h, max(0,x):x+w].copy()
 
-# Cleaning for OCR
+# 
 def _clean_roi(img: np.ndarray) -> np.ndarray:
     img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
@@ -125,6 +157,7 @@ def _clean_roi(img: np.ndarray) -> np.ndarray:
 
     res = 255 - mask
     return res
+
 
 def load_digit_templates(dirpath: Path = TEMPLATES_DIR) -> dict[int, np.ndarray]:
     global _TMPL_CACHE
@@ -267,32 +300,6 @@ def segment_digits(bin_img: np.ndarray, tmpls: Dict[str, np.ndarray]) -> Tuple[n
     Split a binarized image (white bg=255, black digits=0) into two digits
     and pad each to the template size using the template's foreground bbox.
     """
-    def tight_bbox_black_on_white(img: np.ndarray):
-        g = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        fg = (g < 128).astype(np.uint8)
-        ys, xs = np.where(fg > 0)
-        if xs.size == 0 or ys.size == 0:
-            return 0, 1, 0, 1
-        return ys.min(), ys.max()+1, xs.min(), xs.max()+1
-
-    def pad_to_match_template_bbox(digit_img: np.ndarray, template_img: np.ndarray):
-
-        Ht, Wt = template_img.shape[:2]
-        y0t, y1t, x0t, x1t = tight_bbox_black_on_white(template_img)
-        y0, y1, x0, x1 = tight_bbox_black_on_white(digit_img)
-        crop = digit_img[y0:y1, x0:x1]
-
-        h, w = crop.shape
-        target_h, target_w = y1t - y0t, x1t - x0t
-        scale = min(target_h / max(1, h), target_w / max(1, w))
-        nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
-        resized = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_AREA)
-
-        canvas = np.full((Ht, Wt), 255, np.uint8)
-        y_off = y0t + (target_h - nh)//2
-        x_off = x0t + (target_w - nw)//2
-        canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
-        return canvas
 
     g = bin_img if bin_img.ndim == 2 else cv2.cvtColor(bin_img, cv2.COLOR_BGR2GRAY)
     fg = (g < 128).astype(np.uint8)
@@ -643,25 +650,44 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     frame_bgr = _as_bgr(img)
     H, W = frame_bgr.shape[:2]
     geom = load_geometry()
-    rx, ry, rw, rh = get_abs_rect(geom, "round_phase", W, H)
+    rx, ry, rw, rh = get_abs_rect(geom, "round", W, H)
+    px, py, pw, ph = get_abs_rect(geom, "phase", W, H)
 
+    # Round (digit)
     roi = _crop(frame_bgr, (rx, ry, rw, rh))
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    text = pytesseract.image_to_string(thresh)
+    roi = _clean_roi(roi)
+    roi = pad_to_match_template_bbox(roi, TEMPLATE_0)  # keep as-is
+    text, conf = _match_digit(roi, TESS_MULTI)
 
-    cleaned = text.strip().replace('\n', ' ')
-    match = re.search(r"Round\s*([0-9|Il]+).*?(Battle|Deploy)", cleaned, re.IGNORECASE)
+    round_num = None
+    if conf > 60:
+        round_num = int(text)
 
-    if match:
-        raw_num = match.group(1)
-        # Fix common OCR confusion: "|" → "1"
-        round_num = int(raw_num.replace('|', '1'))
-        phase = match.group(2).lower()
-        result = (round_num, phase)
-    else:
-        result = (None, None)
-    return result
+    # Phase (battle/deploy) 
+    roi = _crop(frame_bgr, (px, py, pw, ph))
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (5, 40, 140), (25, 255, 255))  # peach/orange band
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3,3),np.uint8), 2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((3,3),np.uint8), 1)
+    res = 255 - mask 
+
+    best_phase, best_score = None, -1.0
+    for phase_name, path in (("battle", "assets/templates/battle.png"),
+                             ("deploy", "assets/templates/deploy.png")):
+        tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if tmpl is None:
+            continue
+        score = float(cv2.matchTemplate(res, tmpl, cv2.TM_CCOEFF_NORMED)[0][0])
+        if score > best_score:
+            best_score = score
+            best_phase = phase_name
+
+    if best_phase is not None and best_score > 0.8:
+        return round_num, best_phase
+
+    return round_num, None
+
+    
 
 def is_game_over(img: ImgLike) -> Tuple[bool, bool]:
     frame_bgr = _as_bgr(img)
@@ -803,7 +829,7 @@ if __name__ == "__main__":
     ap.add_argument("image", type=str, help="Path to screenshot image")
     args = ap.parse_args()
 
-    start = time.perf_counter()   # start high-res timer
+    start = time.perf_counter() 
     state = get_state(args.image)
     is_home = is_home_screen(args.image)
     # label, tile_index = get_roboflow_prediction(args.image)
