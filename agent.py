@@ -905,11 +905,12 @@ class MergeTacticsEnv:
 
         SELL_1STAR_PENALTY = -2
         if sold_one_star and not bench_full_pre:
+            sell_penalty = SELL_1STAR_PENALTY
             step_reward += SELL_1STAR_PENALTY
 
         print(
             f"  - Reward: {step_reward:.3f} "
-            f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, SellPenalty: {SELL_1STAR_PENALTY:.3f}"
+            f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, SellPenalty: {sell_penalty:.3f} "
             f"BoardFill: {board_fill_reward:.3f} | desired={desired_slots}, actual={actual_slots}, phase={phase})"
         )
 
