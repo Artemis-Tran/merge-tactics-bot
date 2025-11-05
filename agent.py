@@ -904,6 +904,7 @@ class MergeTacticsEnv:
         step_reward = networth_reward + merge_reward + board_fill_reward
 
         SELL_1STAR_PENALTY = -2
+        sell_penalty = 0.0
         if sold_one_star and not bench_full_pre:
             sell_penalty = SELL_1STAR_PENALTY
             step_reward += sell_penalty
