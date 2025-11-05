@@ -841,9 +841,9 @@ class MergeTacticsEnv:
         value_reward = 0.005 * total_unit_value
 
         # Reward for executing a merge
-        merge_reward = 1 if merged else 0.0
+        merge_reward = 4 if merged else 0.0
         if merged:
-            print("  - MERGE DETECTED! +1 reward")
+            print("  - MERGE DETECTED! +4 reward")
 
         # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         # Board-fill shaping: heavily incentivize having desired units on board
