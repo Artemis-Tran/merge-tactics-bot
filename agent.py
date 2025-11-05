@@ -117,6 +117,15 @@ def logical_board_count(tracker: BoardBenchTracker) -> int:
     """How many logical board slots are currently filled (capped to 6)."""
     return min(len(tracker.list_occupied_board_indices()), LOGICAL_BOARD_SLOTS)
 
+def save_checkpoint(agent, episode, filename):
+    checkpoint = {
+        "model": agent.q_online.state_dict(),
+        "optimizer": agent.optimizer.state_dict(),
+        "episode": episode,
+    }
+    torch.save(checkpoint, filename)
+    print(f"[save] Checkpoint saved: {filename}")
+
 
 # -------------------------------------------------------------------
 # Action Masking
@@ -713,6 +722,9 @@ class MergeTacticsEnv:
         # Snapshot tracker so we can roll back if UI didn't commit the action.
         tracker_snapshot = copy.deepcopy(self.tracker)
         pre_state_vector = vectorize_state(last_game_state, self.tracker)
+        
+        prev_mana = int(getattr(last_game_state, "mana", 0.0) or 0.0)
+        prev_total_unit_value, _ = calculate_net_worth(tracker_snapshot, 0)
 
         merged = False
         last_phase = getattr(last_game_state, "phase", None)
@@ -837,8 +849,17 @@ class MergeTacticsEnv:
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
         total_unit_value, _ = calculate_net_worth(self.tracker, 0)
         
-        mana_reward = 0.01 * current_mana - 0.02
-        value_reward = 0.005 * total_unit_value
+        current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
+        total_unit_value, _ = calculate_net_worth(self.tracker, 0)
+
+        LAMBDA_MANA = 0.4    # how much to value unspent mana vs units
+        NET_K = 0.03         # scale for the delta-net-worth reward
+
+        prev_net = prev_total_unit_value + LAMBDA_MANA * prev_mana
+        curr_net = total_unit_value + LAMBDA_MANA * current_mana
+        networth_reward = NET_K * (curr_net - prev_net)
+
+        tick_penalty = -0.01  
 
         # Reward for executing a merge
         merge_reward = 4 if merged else 0.0
@@ -850,13 +871,13 @@ class MergeTacticsEnv:
         desired_slots = self.compute_desired_board_for_state(next_game_state)
         actual_slots  = logical_board_count(self.tracker)
 
-        # Gap: how far below desired we are (never negative)
         underfill = max(0, desired_slots - actual_slots)
 
-        # Heavier weight during battle; lighter during deploy so agent preps early
+       
         phase = getattr(next_game_state, "phase", None)
+        time_left = getattr(next_game_state, "timer", None)
         board_fill_reward = 0.0
-        if phase == "battle":
+        if phase == "battle" or time_left < 30:
             desired_slots = self.compute_desired_board_for_state(next_game_state)
             desired_slots = max(0, min(desired_slots, LOGICAL_BOARD_SLOTS))
 
@@ -864,14 +885,14 @@ class MergeTacticsEnv:
 
             underfill = max(0, desired_slots - actual_slots)
 
-            BOARD_UNDERFILL_WEIGHT = 0.35
+            BOARD_UNDERFILL_WEIGHT = 0.4
             board_fill_reward = -BOARD_UNDERFILL_WEIGHT * float(underfill)
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-        step_reward = mana_reward + value_reward + merge_reward + board_fill_reward
+        step_reward = networth_reward + merge_reward + board_fill_reward + tick_penalty
         print(
             f"  - Reward: {step_reward:.3f} "
-            f"(Mana: {mana_reward:.3f}, Value: {value_reward:.3f}, Merge: {merge_reward:.3f}, "
+            f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
             f"BoardFill: {board_fill_reward:.3f} | desired={desired_slots}, actual={actual_slots}, phase={phase})"
         )
 
@@ -892,7 +913,7 @@ class MergeTacticsEnv:
                 terminal_reward = -50.0
     
             
-            step_reward += terminal_reward + (0.1 * current_mana)
+            step_reward += terminal_reward 
             print(f"  - GAME OVER! Placement: {placement_value}, Final Reward: {step_reward:.3f}")
 
         next_state_vector = vectorize_state(next_game_state, self.tracker)
@@ -938,7 +959,10 @@ def train(episodes: int = 3,
         state_vector, game_state = env_wrapper.reset()
         episode_return = 0.0
         print(f"\n--- Episode {episode_index+1}/{episodes} ---")
-
+        save_checkpoint(agent, episode_index+1, "dqn_merge_tactics_latest.pt")
+        if (episode_index + 1) % 50 == 0:
+            ckpt_path = f"dqn_merge_tactics_ep{episode_index+1}.pt"
+            save_checkpoint(agent, episode_index+1, ckpt_path)
         for step_index in range(10_000):
             print(f"Step {step_index+1}:")
             # Epsilon linear schedule
