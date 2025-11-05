@@ -864,14 +864,13 @@ class MergeTacticsEnv:
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
         total_unit_value, _ = calculate_net_worth(self.tracker, 0)
 
-        LAMBDA_MANA = 0.4    # how much to value unspent mana vs units
+        LAMBDA_MANA = 0.5    # how much to value unspent mana vs units
         NET_K = 0.03         # scale for the delta-net-worth reward
 
         prev_net = prev_total_unit_value + LAMBDA_MANA * prev_mana
         curr_net = total_unit_value + LAMBDA_MANA * current_mana
         networth_reward = NET_K * (curr_net - prev_net)
 
-        tick_penalty = -0.01  
 
         # Reward for executing a merge
         merge_reward = 4 if merged else 0.0
@@ -902,7 +901,7 @@ class MergeTacticsEnv:
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         
 
-        step_reward = networth_reward + merge_reward + board_fill_reward + tick_penalty
+        step_reward = networth_reward + merge_reward + board_fill_reward
 
         SELL_1STAR_PENALTY = -2
         if sold_one_star and not bench_full_pre:
@@ -910,7 +909,7 @@ class MergeTacticsEnv:
 
         print(
             f"  - Reward: {step_reward:.3f} "
-            f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
+            f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, SellPenalty: {SELL_1STAR_PENALTY:.3f}"
             f"BoardFill: {board_fill_reward:.3f} | desired={desired_slots}, actual={actual_slots}, phase={phase})"
         )
 
