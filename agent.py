@@ -878,9 +878,9 @@ class MergeTacticsEnv:
         num_level2 = 0
         for trait, count in trait_counts.items():
             if count >= 4:
-                num_l2 += 1
+                num_level2 += 1
             elif count >= 2:
-                num_l1 += 1
+                num_level1 += 1
 
         # --- Reward Shaping ---
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
@@ -933,7 +933,7 @@ class MergeTacticsEnv:
         buy_reward = BUY_REWARD if bought else 0.0
 
         # Trait synergy reward 
-        trait_reward = (num_l1 * TRAIT_LEVEL1_W) + (num_l2 * TRAIT_LEVEL2_W) if phase == "battle" else 0.0
+        trait_reward = (num_level1 * TRAIT_LEVEL1_W) + (num_level2 * TRAIT_LEVEL2_W) if phase == "battle" else 0.0
 
         # Battle-only board power reward (encourage putting value on the field)
         board_power_reward = 0.0
