@@ -1022,6 +1022,8 @@ class MergeTacticsEnv:
         SELL_1STAR_PENALTY = -1
         sell_penalty = SELL_1STAR_PENALTY if (sold_one_star and not bench_full_pre) else 0.0
 
+        tick_penalty = -0.01
+
         step_reward = (
             networth_reward
             + merge_reward
@@ -1030,6 +1032,7 @@ class MergeTacticsEnv:
             + board_value_delta_reward
             + buy_reward
             + sell_penalty
+            + tick_penalty
         )
 
         print(
