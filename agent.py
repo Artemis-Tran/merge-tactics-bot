@@ -1117,12 +1117,32 @@ def train(episodes: int = 3,
                             start_battle()
                     start_battle()
                     print("Waiting for new game to start...")
+                    retry_limit = 5  # number of retry cycles (adjust as needed)
+                    retry_delay = 6  # seconds between retries
+                    retry_count = 0
+
                     while True:
                         frame = vision.capture_frame()
                         current_state = env.get_state(frame)
                         if validate_state(current_state):
                             print("New game detected. Starting next episode...")
                             break
+
+                        time.sleep(1)
+                        retry_count += 1
+
+                        # Every 6 seconds, attempt a retry action
+                        if retry_count % retry_delay == 0:
+                            print(f"[wait] Still no new game after {retry_count}s. Retrying start_battle()...")
+                            start_battle()
+
+                        # Optional safety timeout
+                        if retry_count >= retry_limit * retry_delay:
+                            print("[wait] Timeout: forcing return_home() + start_battle()")
+                            return_home()
+                            time.sleep(2)
+                            start_battle()
+                            retry_count = 0  # reset and keep waiting
                     break  
 
                 continue 
