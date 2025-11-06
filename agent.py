@@ -565,23 +565,56 @@ class MergeTacticsEnv:
     def reset(self) -> Tuple[np.ndarray, env.GameState]:
         self.tracker = BoardBenchTracker.fresh()
         self.max_desired_board_seen = 2
+
+        max_rf_attempts = 5         # limit roboflow attempts per cycle
+        max_play_again_attempts = 2 # try play_again() up to twice
+
+        play_again_attempts = 0
         label, tile_index = None, None
-        frame = self.vision.capture_frame()
-        state = env.get_state(frame)
-        valid_state = validate_state(state)
+        valid_state = False
+
         while not valid_state or not label:
-            frame = self.vision.capture_frame()
-            state = env.get_state(frame)
-            valid_state = validate_state(state)
-            label, tile_index = env.get_roboflow_prediction(frame)
-        
-    
-        print(f"Roboflow predicted {label} at index {tile_index}")
-        self.tracker.set_board_tile(tile_index, label, star_level=1)
+            for attempt in range(max_rf_attempts):
+                frame = self.vision.capture_frame()
+                state = env.get_state(frame)
+                valid_state = validate_state(state)
+                if not valid_state:
+                    continue
+                label, tile_index = env.get_roboflow_prediction(frame)
+                if label:
+                    break  # success
+                time.sleep(0.3)
+
+            # if still no label after several tries, try to reset game
+            if not label:
+                play_again_attempts += 1
+                print(f"[reset] No valid prediction after {max_rf_attempts} attempts "
+                    f"(attempt {play_again_attempts}/{max_play_again_attempts}). Trying play_again()...")
+                play_again()
+                time.sleep(2)
+
+                if play_again_attempts >= max_play_again_attempts:
+                    print("[reset] Still stuck after play_again retries. Clearing board manually...")
+                    try:
+                        drag(Board(0, 2), Hand(0))
+                        drag(Board(3, 2), Hand(0))
+                    except Exception as e:
+                        print(f"[reset] Manual clear failed: {e}")
+                    break  # stop looping — proceed anyway
+
+        label = label or "Unknown"
+        tile_index = tile_index or 0
+
+        if label != "Unknown" and tile_index is not None:
+            print(f"Roboflow predicted {label} at index {tile_index}")
+            self.tracker.set_board_tile(tile_index, label, star_level=1)
+        else:
+            print("[reset] No valid unit detected — board assumed empty.")
 
         game_state = env.get_state(frame)
         state_vector = vectorize_state(game_state, self.tracker)
         return state_vector, game_state
+
 
     # ----------------------- helpers -----------------------
     def _enumerate_board_occupied_indices(self) -> List[int]:
@@ -1058,9 +1091,12 @@ def train(episodes: int = 3,
                 continue
 
             episode_return += reward_value
+
+            prev_state_vector = state_vector
             game_state =  next_game_state
+            state_vector = next_state_vector
             if not eval_mode:
-                replay_buffer.push(Transition(state_vector=state_vector,
+                replay_buffer.push(Transition(state_vector=prev_state_vector,
                                             action_index=action_index,
                                             reward_value=reward_value,
                                             next_state_vector=next_state_vector,
@@ -1072,7 +1108,7 @@ def train(episodes: int = 3,
                     batch = replay_buffer.sample(batch_size)
                     loss_value = agent.train_step(batch)
                     print(f" Loss: {loss_value:.4f}")
-
+            
             global_step_counter += 1
             if done_flag:
                 print(f"--- Episode {episode_index+1} Finished ---")
