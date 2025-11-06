@@ -125,6 +125,23 @@ def is_ranged(label: Optional[str]) -> bool:
     if not label: return False
     return CARD_DATA.get(label, {}).get("type", "").lower() == "ranged"
 
+def terminal_outcome(self, next_game_state):
+    game_over, will_play_again = getattr(next_game_state, "game_over", (False, False))
+    placement_value = None
+    terminal_reward = 0.0
+    if game_over:
+        time.sleep(1)
+        end_frame = self.vision.capture_frame()
+        placement = env.get_placement(end_frame)
+        placement_value = int(placement) if placement else 8
+        if placement_value == 1:
+            terminal_reward = 50.0
+        elif placement_value == 2:
+            terminal_reward = 25.0
+        elif placement_value == 4:
+            terminal_reward = -25.0
+    return game_over, bool(will_play_again), placement_value, terminal_reward
+
 def save_checkpoint(agent, episode, filename):
     checkpoint = {
         "model": agent.q_online.state_dict(),
@@ -161,7 +178,11 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker) -> np
     move_base       = swap_base + NUM_SWAP_ACTIONS  # front then back
 
     num_occupied_board = len(tracker.list_occupied_board_indices())
-    can_buy = any(getattr(c, "label", None) for c in game_state.cards)
+    current_mana = int(getattr(game_state, "mana", 0) or 0)
+    can_buy = any(
+        getattr(c, "label", None) and int(getattr(c, "cost", 0) or 0) <= current_mana
+        for c in game_state.cards
+    )
 
     if phase == "battle":
         # --- BATTLE: Only bench-safe actions ---
@@ -799,17 +820,16 @@ class MergeTacticsEnv:
             next_game_state = env.get_state(frame)
             next_state_vector = vectorize_state(next_game_state, self.tracker)
 
-            done_flag, will_play_again  = getattr(next_game_state, "game_over", (False, False))
+            done_flag, will_play_again, placement_value, terminal_reward = self._terminal_outcome(next_game_state)
+
             info = {
                 "forced_noop_tick": True,
-                "placement": getattr(next_game_state, "placement", None),
-                "play_again": bool(will_play_again),
+                "placement": placement_value,
+                "play_again": will_play_again,
             }
-
-            # Zero reward (or a tiny negative time penalty, e.g., -0.01 to discourage long idles)
-            reward_value = 0.0
+            reward_value = 0.0 + terminal_reward
             return next_state_vector, next_game_state, reward_value, done_flag, info
-        
+                
         # Snapshot tracker so we can roll back if UI didn't commit the action.
         tracker_snapshot = copy.deepcopy(self.tracker)
         pre_state_vector = vectorize_state(last_game_state, self.tracker)
@@ -896,7 +916,6 @@ class MergeTacticsEnv:
         frame = self.vision.capture_frame()
         next_game_state = env.get_state(frame)
 
-        mask_next = get_action_mask(next_game_state, self.tracker)
         phase = getattr(next_game_state, "phase", None)
         mana_conf = getattr(next_game_state, "mana_conf", 0.0)
         game_over, will_play_again  = getattr(next_game_state, "game_over", (False, False))
@@ -1018,28 +1037,8 @@ class MergeTacticsEnv:
             f"(ΔNet: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
             f"ΔSlots: {board_slots_delta_reward:.3f}, ΔTraits: {trait_delta_reward:.3f}, "
             f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty:.3f} "
-            f"| phase={phase})"
+            f"| phase={phase} round={getattr(next_game_state, 'round', 0)})"
         )
-
-        done_flag = game_over
-        placement_value = None
-        if done_flag:
-            time.sleep(1)
-            end_frame = self.vision.capture_frame()
-            placement = env.get_placement(end_frame)
-            placement_value = int(placement) if placement else 8
-            
-            terminal_reward = 0
-            if placement_value == 1:
-                terminal_reward = 50.0
-            elif placement_value == 2:
-                terminal_reward = 25.0
-            elif placement_value == 4:
-                terminal_reward = -25.0
-    
-            
-            step_reward += terminal_reward 
-            print(f"  - GAME OVER! Placement: {placement_value}, Final Reward: {step_reward:.3f}")
 
         next_state_vector = vectorize_state(next_game_state, self.tracker)
         info = {"placement": placement_value,"play_again": bool(will_play_again)}
@@ -1101,7 +1100,7 @@ def train(episodes: int = 3,
                     env_wrapper.step(0, game_state, forced_noop=True)
 
                 state_vector, game_state = next_state_vector, next_game_state
-
+                episode_return += reward_value
                 if done_flag:
                     print(f"--- Episode {episode_index+1} Finished (passive) ---")
                     print(f"  Steps: {step_index+1}")
