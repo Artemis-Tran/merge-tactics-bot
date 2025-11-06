@@ -274,6 +274,18 @@ def calculate_board_value(tracker: BoardBenchTracker) -> int:
             total += CARD_COSTS.get(label, 0) * stars
     return total
 
+def trait_levels_for_tracker(tracker: BoardBenchTracker) -> Tuple[int, int]:
+    """Return (#level1_traits, #level2_traits) using the same thresholds as step()."""
+    trait_counts = {trait: 0 for trait in ALL_TRAITS}
+    for label in tracker.board_labels:
+        if label in CARD_TRAITS:
+            for t in CARD_TRAITS[label]:
+                if t in trait_counts:
+                    trait_counts[t] += 1
+    num_level1 = sum(1 for c in trait_counts.values() if 2 <= c < 4)
+    num_level2 = sum(1 for c in trait_counts.values() if c >= 4)
+    return num_level1, num_level2
+
 
 # -------------------------------------------------------------------
 # Lightweight trackers
@@ -495,7 +507,6 @@ class DQNAgent:
 
     @torch.no_grad()
     def act(self, state_vector: np.ndarray, epsilon: float, mask: np.ndarray) -> int:
-        # If no actions are possible, do nothing (should be rare)
         if not np.any(mask):
             return -1 # Sentinel for no-op
 
@@ -747,6 +758,10 @@ class MergeTacticsEnv:
         prev_mana = int(getattr(last_game_state, "mana", 0.0) or 0.0)
         prev_total_unit_value, _ = calculate_net_worth(tracker_snapshot, 0)
 
+        prev_board_slots = logical_board_count(tracker_snapshot)      
+        prev_board_value = calculate_board_value(tracker_snapshot)    
+        prev_l1, prev_l2 = trait_levels_for_tracker(tracker_snapshot) 
+
         merged = False
         bought = False
         last_phase = getattr(last_game_state, "phase", None)
@@ -818,6 +833,8 @@ class MergeTacticsEnv:
         time.sleep(0.4) # Allow UI to update
         frame = self.vision.capture_frame()
         next_game_state = env.get_state(frame)
+
+        mask_next = get_action_mask(next_game_state, self.tracker)
         phase = getattr(next_game_state, "phase", None)
         mana_conf = getattr(next_game_state, "mana_conf", 0.0)
         game_over, will_play_again  = getattr(next_game_state, "game_over", (False, False))
@@ -892,77 +909,57 @@ class MergeTacticsEnv:
         LAMBDA_MANA = 0.5    # how much to value unspent mana vs units
         NET_K = 0.03         # scale for the delta-net-worth reward
 
-        BUY_REWARD = 0.4            # small bump when a purchase commits
-        TRAIT_LEVEL1_W = 0.3          # per active Level-1 trait
-        TRAIT_LEVEL2_W = 0.5           # per active Level-2 trait
-        BATTLE_BOARD_VALUE_K = 0.02 # per gold-equivalent on board during battle (small)
-
-        prev_net = prev_total_unit_value + LAMBDA_MANA * prev_mana
-        curr_net = total_unit_value + LAMBDA_MANA * current_mana
-        networth_reward = NET_K * (curr_net - prev_net)
-
-
-        # Reward for executing a merge
         merge_reward = 4 if merged else 0.0
         if merged:
             print("  - MERGE DETECTED! +4 reward")
 
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # Board-fill shaping: heavily incentivize having desired units on board
-        desired_slots = self.compute_desired_board_for_state(next_game_state)
-        actual_slots  = logical_board_count(self.tracker)
+        # Compute current values AFTER the action/UI settles:
+        current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
+        total_unit_value, _ = calculate_net_worth(self.tracker, 0)
+        curr_net = total_unit_value + LAMBDA_MANA * current_mana
+        prev_net = prev_total_unit_value + LAMBDA_MANA * prev_mana
+        networth_reward = NET_K * (curr_net - prev_net)
 
-        underfill = max(0, desired_slots - actual_slots)
+        ALPHA_SLOTS = 0.6
+        curr_board_slots = logical_board_count(self.tracker)
+        board_slots_delta_reward = ALPHA_SLOTS * float(curr_board_slots - prev_board_slots)
 
-       
+        DELTA_L1_W = 0.4
+        DELTA_L2_W = 0.7
+        curr_l1, curr_l2 = trait_levels_for_tracker(self.tracker)
+        trait_delta_reward = 0.0
         phase = getattr(next_game_state, "phase", None)
-        time_left = getattr(next_game_state, "timer", None)
-        board_fill_reward = 0.0
-        if phase == "battle" or time_left < 30:
-            desired_slots = self.compute_desired_board_for_state(next_game_state)
-            desired_slots = max(0, min(desired_slots, LOGICAL_BOARD_SLOTS))
-
-            actual_slots = logical_board_count(self.tracker) 
-
-            underfill = max(0, desired_slots - actual_slots)
-
-            BOARD_UNDERFILL_WEIGHT = 0.4
-            board_fill_reward = -BOARD_UNDERFILL_WEIGHT * float(underfill)
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-        buy_reward = BUY_REWARD if bought else 0.0
-
-        # Trait synergy reward 
-        trait_reward = (num_level1 * TRAIT_LEVEL1_W) + (num_level2 * TRAIT_LEVEL2_W) if phase == "battle" else 0.0
-
-        # Battle-only board power reward (encourage putting value on the field)
-        board_power_reward = 0.0
         if phase == "battle":
-            board_value = calculate_board_value(self.tracker)
-            board_power_reward = BATTLE_BOARD_VALUE_K * board_value
-        
+            trait_delta_reward = DELTA_L1_W * (curr_l1 - prev_l1) + DELTA_L2_W * (curr_l2 - prev_l2)
+
+        DELTA_BOARD_VALUE_K = 0.01
+        curr_board_value = calculate_board_value(self.tracker)
+        board_value_delta_reward = 0.0
+        if phase == "battle":
+            board_value_delta_reward = DELTA_BOARD_VALUE_K * (curr_board_value - prev_board_value)
+
+        BUY_COMMIT_REWARD = 0.2
+        buy_reward = BUY_COMMIT_REWARD if (bought and (curr_net - prev_net) > 0) else 0.0
+
+        SELL_1STAR_PENALTY = -1
+        sell_penalty = SELL_1STAR_PENALTY if (sold_one_star and not bench_full_pre) else 0.0
 
         step_reward = (
             networth_reward
             + merge_reward
-            + board_fill_reward
+            + board_slots_delta_reward
+            + trait_delta_reward
+            + board_value_delta_reward
             + buy_reward
-            + trait_reward
-            + board_power_reward
+            + sell_penalty
         )
-
-        SELL_1STAR_PENALTY = -2
-        sell_penalty = 0.0
-        if sold_one_star and not bench_full_pre:
-            sell_penalty = SELL_1STAR_PENALTY
-            step_reward += sell_penalty
 
         print(
             f"  - Reward: {step_reward:.3f} "
-            f"(Networth: {networth_reward:.3f}, Merge: {merge_reward:.3f}, Sell Penalty: {sell_penalty:.3f} "
-            f"BoardFill: {board_fill_reward:.3f}, Buy: {buy_reward:.3f}, "
-            f"Traits: {trait_reward:.3f}, BoardPower: {board_power_reward:.3f} "
-            f"| desired={desired_slots}, actual={actual_slots}, phase={phase})"
+            f"(ΔNet: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
+            f"ΔSlots: {board_slots_delta_reward:.3f}, ΔTraits: {trait_delta_reward:.3f}, "
+            f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty:.3f} "
+            f"| phase={phase})"
         )
 
         done_flag = game_over
@@ -979,14 +976,14 @@ class MergeTacticsEnv:
             elif placement_value == 2:
                 terminal_reward = 25.0
             elif placement_value == 4:
-                terminal_reward = -50.0
+                terminal_reward = -25.0
     
             
             step_reward += terminal_reward 
             print(f"  - GAME OVER! Placement: {placement_value}, Final Reward: {step_reward:.3f}")
 
         next_state_vector = vectorize_state(next_game_state, self.tracker)
-        info = {"placement": placement_value, "play_again": bool(will_play_again)}
+        info = {"placement": placement_value,"play_again": bool(will_play_again)}
         return next_state_vector, next_game_state, float(step_reward), done_flag, info
 
 # -------------------------------------------------------------------
@@ -1039,6 +1036,13 @@ def train(episodes: int = 3,
             epsilon = epsilon_start + fraction * (epsilon_final - epsilon_start)
 
             action_mask = get_action_mask(game_state, env_wrapper.tracker)
+            if np.count_nonzero(action_mask) == 1 and action_mask[0]:
+                print("[train] Forced NoOp (only NoOp valid). Skipping and refreshing state.")
+                time.sleep(0.2)
+                frame = vision.capture_frame()
+                game_state = env.get_state(frame)
+                state_vector = vectorize_state(game_state, env_wrapper.tracker)
+                continue
             action_index = agent.act(state_vector, epsilon, action_mask)
 
             if action_index == -1:
@@ -1054,7 +1058,7 @@ def train(episodes: int = 3,
                 continue
 
             episode_return += reward_value
-            state_vector, game_state = next_state_vector, next_game_state
+            game_state =  next_game_state
             if not eval_mode:
                 replay_buffer.push(Transition(state_vector=state_vector,
                                             action_index=action_index,
