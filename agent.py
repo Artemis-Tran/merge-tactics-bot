@@ -99,7 +99,7 @@ ACTION_SIZE = (
 STATE_SIZE = (LOGICAL_BOARD_SLOTS * 2) + (LOGICAL_BENCH_SLOTS * 2) + (MAX_HAND_SLOTS * 2) + NUM_TRAITS + 4
 
 
-# State Helper
+# Helpers
 def validate_state(state) -> bool:
     if getattr(state, "mana_conf", 0) < 65:
         return False
@@ -116,6 +116,14 @@ def validate_state(state) -> bool:
 def logical_board_count(tracker: BoardBenchTracker) -> int:
     """How many logical board slots are currently filled (capped to 6)."""
     return min(len(tracker.list_occupied_board_indices()), LOGICAL_BOARD_SLOTS)
+
+def is_melee(label: Optional[str]) -> bool:
+    if not label: return False
+    return CARD_DATA.get(label, {}).get("type", "").lower() == "melee"
+
+def is_ranged(label: Optional[str]) -> bool:
+    if not label: return False
+    return CARD_DATA.get(label, {}).get("type", "").lower() == "ranged"
 
 def save_checkpoint(agent, episode, filename):
     checkpoint = {
@@ -191,11 +199,16 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker) -> np
     # Move Bench -> Front/Back Row
     for bench_idx in range(LOGICAL_BENCH_SLOTS):
         if tracker.bench_stars[bench_idx] > 0:
-            # to front row
-            mask[move_base + bench_idx] = True
-            # to back row
-            mask[move_base + LOGICAL_BENCH_SLOTS + bench_idx] = True
+            label = tracker.bench_labels[bench_idx]
+            front_idx = move_base + bench_idx
+            back_idx  = move_base + LOGICAL_BENCH_SLOTS + bench_idx
 
+            if is_melee(label):
+                mask[front_idx] = True         # melee → front only
+                mask[back_idx]  = False
+            elif is_ranged(label):
+                mask[front_idx] = False
+                mask[back_idx]  = True         # ranged → back only
     return mask
 
 
@@ -777,10 +790,26 @@ class MergeTacticsEnv:
 
 
     # ----------------------- core step -----------------------
-    def step(self, action_index: int, last_game_state: env.GameState) -> Tuple[np.ndarray, env.GameState, float, bool, dict]:
+    def step(self, action_index: int, last_game_state: env.GameState, forced_noop: bool = False) -> Tuple[np.ndarray, env.GameState, float, bool, dict]:
         """
         Executes an action and observes the next state and reward.
         """
+        if forced_noop:
+            frame = self.vision.capture_frame()
+            next_game_state = env.get_state(frame)
+            next_state_vector = vectorize_state(next_game_state, self.tracker)
+
+            done_flag, will_play_again  = getattr(next_game_state, "game_over", (False, False))
+            info = {
+                "forced_noop_tick": True,
+                "placement": getattr(next_game_state, "placement", None),
+                "play_again": bool(will_play_again),
+            }
+
+            # Zero reward (or a tiny negative time penalty, e.g., -0.01 to discourage long idles)
+            reward_value = 0.0
+            return next_state_vector, next_game_state, reward_value, done_flag, info
+        
         # Snapshot tracker so we can roll back if UI didn't commit the action.
         tracker_snapshot = copy.deepcopy(self.tracker)
         pre_state_vector = vectorize_state(last_game_state, self.tracker)
@@ -936,9 +965,6 @@ class MergeTacticsEnv:
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
         total_unit_value, _ = calculate_net_worth(self.tracker, 0)
         
-        current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
-        total_unit_value, _ = calculate_net_worth(self.tracker, 0)
-
         LAMBDA_MANA = 0.5    # how much to value unspent mana vs units
         NET_K = 0.03         # scale for the delta-net-worth reward
 
@@ -1070,12 +1096,37 @@ def train(episodes: int = 3,
 
             action_mask = get_action_mask(game_state, env_wrapper.tracker)
             if np.count_nonzero(action_mask) == 1 and action_mask[0]:
-                print("[train] Forced NoOp (only NoOp valid). Skipping and refreshing state.")
-                time.sleep(0.2)
-                frame = vision.capture_frame()
-                game_state = env.get_state(frame)
-                state_vector = vectorize_state(game_state, env_wrapper.tracker)
-                continue
+                print("[train] Forced NoOp (only NoOp valid). Advancing passively.")
+                next_state_vector, next_game_state, reward_value, done_flag, info = \
+                    env_wrapper.step(0, game_state, forced_noop=True)
+
+                state_vector, game_state = next_state_vector, next_game_state
+
+                if done_flag:
+                    print(f"--- Episode {episode_index+1} Finished (passive) ---")
+                    print(f"  Steps: {step_index+1}")
+                    print(f"  Return: {episode_return:.2f}")
+                    print(f"  Epsilon: {epsilon:.3f}")
+                    print(f"  Placement: {info.get('placement')}")
+                    time.sleep(2)
+                    if info.get("play_again", False):
+                        play_again()
+                    else:
+                        return_home()
+                        time.sleep(1)
+                        while not env.is_home_screen:
+                            start_battle()
+                    start_battle()
+                    print("Waiting for new game to start...")
+                    while True:
+                        frame = vision.capture_frame()
+                        current_state = env.get_state(frame)
+                        if validate_state(current_state):
+                            print("New game detected. Starting next episode...")
+                            break
+                    break  
+
+                continue 
             action_index = agent.act(state_vector, epsilon, action_mask)
 
             if action_index == -1:
