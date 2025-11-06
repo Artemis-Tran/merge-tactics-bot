@@ -125,23 +125,6 @@ def is_ranged(label: Optional[str]) -> bool:
     if not label: return False
     return CARD_DATA.get(label, {}).get("type", "").lower() == "ranged"
 
-def terminal_outcome(self, next_game_state):
-    game_over, will_play_again = getattr(next_game_state, "game_over", (False, False))
-    placement_value = None
-    terminal_reward = 0.0
-    if game_over:
-        time.sleep(1)
-        end_frame = self.vision.capture_frame()
-        placement = env.get_placement(end_frame)
-        placement_value = int(placement) if placement else 8
-        if placement_value == 1:
-            terminal_reward = 50.0
-        elif placement_value == 2:
-            terminal_reward = 25.0
-        elif placement_value == 4:
-            terminal_reward = -25.0
-    return game_over, bool(will_play_again), placement_value, terminal_reward
-
 def save_checkpoint(agent, episode, filename):
     checkpoint = {
         "model": agent.q_online.state_dict(),
@@ -179,10 +162,33 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker) -> np
 
     num_occupied_board = len(tracker.list_occupied_board_indices())
     current_mana = int(getattr(game_state, "mana", 0) or 0)
-    can_buy = any(
-        getattr(c, "label", None) and int(getattr(c, "cost", 0) or 0) <= current_mana
-        for c in game_state.cards
-    )
+
+     # === Debug Print: Shop and Mana State ===
+    if DEBUG_MODE:
+        print("\n[Shop Debug]")
+        print(f"  Current Mana: {current_mana}")
+        for i, c in enumerate(game_state.cards):
+            label = getattr(c, "label", None)
+            conf = getattr(c, "conf", 0.0)
+            raw_cost = getattr(c, "cost", None)
+            table_cost = CARD_COSTS.get(label, None)
+            final_cost = table_cost if table_cost is not None else raw_cost
+            print(f"  Slot {i}: {label or 'None'} | conf={conf:.2f} | "
+                f"raw_cost={raw_cost} | table_cost={table_cost} | final_cost={final_cost}")
+        print("-" * 60)
+
+    def card_affordable(c):
+        label = getattr(c, "label", None)
+        if not label:
+            return False
+        return CARD_COSTS.get(label, 9999) <= current_mana
+    
+    debug_cards = [
+        (getattr(c, "label", None), CARD_COSTS.get(getattr(c, "label", None), None))
+        for c in game_state.cards[:MAX_HAND_SLOTS]
+    ]
+    print(f"[mask] mana={current_mana} hand={debug_cards}")
+    can_buy = any(card_affordable(c) for c in game_state.cards[:MAX_HAND_SLOTS])
 
     if phase == "battle":
         # --- BATTLE: Only bench-safe actions ---
@@ -809,6 +815,23 @@ class MergeTacticsEnv:
         self.tracker.set_bench_slot(bench_idx, board_label, board_stars)
         print(f"  - Swapped bench slot {bench_idx} ({bench_label}) with board slot {board_logical_idx} ({board_label})")
 
+    def _terminal_outcome(self, next_game_state):
+        game_over, will_play_again = getattr(next_game_state, "game_over", (False, False))
+        placement_value = None
+        terminal_reward = 0.0
+        if game_over:
+            time.sleep(1)
+            end_frame = self.vision.capture_frame()
+            placement = env.get_placement(end_frame)
+            placement_value = int(placement) if placement else 8
+            if placement_value == 1:
+                terminal_reward = 50.0
+            elif placement_value == 2:
+                terminal_reward = 25.0
+            elif placement_value == 4:
+                terminal_reward = -25.0
+        return game_over, bool(will_play_again), placement_value, terminal_reward
+
 
     # ----------------------- core step -----------------------
     def step(self, action_index: int, last_game_state: env.GameState, forced_noop: bool = False) -> Tuple[np.ndarray, env.GameState, float, bool, dict]:
@@ -861,8 +884,10 @@ class MergeTacticsEnv:
                 hand_index = self._first_nonempty_hand_index(last_game_state)
                 if hand_index is not None:
                     card = last_game_state.cards[hand_index]
-                    if getattr(card, "label", None) and getattr(card, "cost", 0) <= getattr(last_game_state, "mana", 0):
-                        action_desc = f"Buy {card.label} to Bench"
+                    label = getattr(card, "label", None)
+                    mana = int(getattr(last_game_state, "mana", 0) or 0)
+                    if label and CARD_COSTS.get(label, 9999) <= mana:
+                        action_desc = f"Buy {label} to Bench"
                         merged, bought = self._buy_from_hand(hand_index, card)
 
 
@@ -1044,7 +1069,7 @@ class MergeTacticsEnv:
         )
 
         next_state_vector = vectorize_state(next_game_state, self.tracker)
-        info = {"placement": placement_value,"play_again": bool(will_play_again)}
+        info = {"play_again": bool(will_play_again)}
         return next_state_vector, next_game_state, float(step_reward), done_flag, info
 
 # -------------------------------------------------------------------
@@ -1217,11 +1242,14 @@ def train(episodes: int = 3,
 
 # -------------------------------------------------------------------
 def main():
+    global DEBUG_MODE
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=300, help="Number of games to play.")
     parser.add_argument("--weights", type=str, default=None, help="Path to dqn_merge_tactics.pt")
     parser.add_argument("--eval", action="store_true", help="Run in evaluation (no training) mode")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
     args = parser.parse_args()
+    DEBUG_MODE = args.debug
     print(f"Training for {args.episodes} episodes. Use --episodes to change this.")
     start_battle()
     print("Starting battle")
