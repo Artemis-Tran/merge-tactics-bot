@@ -1067,7 +1067,7 @@ class MergeTacticsEnv:
             f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty:.3f} "
             f"| phase={phase} round={getattr(next_game_state, 'round', 0)})"
         )
-
+        done_flag= False
         next_state_vector = vectorize_state(next_game_state, self.tracker)
         info = {"play_again": bool(will_play_again)}
         return next_state_vector, next_game_state, float(step_reward), done_flag, info
