@@ -20,7 +20,7 @@
   "RoyalGhost": { "cost": 4, "type": "melee", "trait1": "Undead", "trait2": "Assassin" },
   "Witch": { "cost": 4, "type": "ranged", "trait1": "Undead", "trait2": "Avenger" },
   "Bandit": { "cost": 4, "type": "melee", "trait1": "Ace", "trait2": "Assassin" },
-  "GoblinMachine": { "cost": 4, "type": "ranged", "trait1": "Goblin", "trait2": "Juggernaut" },
+  "GoblinMachine": { "cost": 4, "type": "melee", "trait1": "Goblin", "trait2": "Juggernaut" },
   "ElectroWizard": { "cost": 4, "type": "ranged", "trait1": "Electric", "trait2": "Mage" },
   "SkeletonKing": { "cost": 5, "type": "melee", "trait1": "Undead", "trait2": "Juggernaut" },
   "GoldenKnight": { "cost": 5, "type": "melee", "trait1": "Noble", "trait2": "Assassin" },
