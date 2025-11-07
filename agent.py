@@ -686,13 +686,18 @@ class MergeTacticsEnv:
     def _bench_is_full(self) -> bool:
         return sum(1 for s in self.tracker.bench_stars if s > 0) >= LOGICAL_BENCH_SLOTS
     
-    def compute_desired_board_for_state(self, game_state) -> int:
-        # raw desired from the current round
+    def compute_desired_board_for_state(self, game_state):
         round_num = int(getattr(game_state, "round", 0) or 0)
+        prev_cap = getattr(self, "max_desired_board_seen", 2)
+
+      
         raw_desired = min(round_num + 1, LOGICAL_BOARD_SLOTS)
 
-        # make it monotonic for this episode
-        if raw_desired > self.max_desired_board_seen:
+        # Guard: if the round drops below 1 or jumps up by more than 1, treat it as noise
+        if raw_desired > prev_cap + 1 or raw_desired < 1:
+            raw_desired = prev_cap
+
+        if raw_desired > prev_cap:
             self.max_desired_board_seen = raw_desired
 
         return self.max_desired_board_seen
@@ -882,6 +887,7 @@ class MergeTacticsEnv:
 
         bench_full_pre = self._bench_is_full()
         sold_one_star = False
+        sold_two_star = False
         
         prev_mana = int(getattr(last_game_state, "mana", 0.0) or 0.0)
         prev_total_unit_value, _ = calculate_net_worth(tracker_snapshot, 0)
@@ -920,6 +926,7 @@ class MergeTacticsEnv:
                 phys = self._map_logical_board_slot_to_physical_index(board_slot)
                 stars_pre = self.tracker.board_stars[phys] if phys is not None else 0
                 sold_one_star = (stars_pre == 1)
+                sold_two_star = (stars_pre == 2)
                 action_desc = f"Sell Board Slot {board_slot}"
                 self._sell_board_slot(board_slot)
 
@@ -927,6 +934,7 @@ class MergeTacticsEnv:
                 bench_slot = action - (NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS)
                 stars_pre = self.tracker.bench_stars[bench_slot] if 0 <= bench_slot < LOGICAL_BENCH_SLOTS else 0
                 sold_one_star = (stars_pre == 1)
+                sold_two_star = (stars_pre == 2)
                 action_desc = f"Sell Bench Slot {bench_slot}"
                 self._sell_bench_slot(bench_slot)
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS + NUM_SWAP_ACTIONS:
@@ -1071,6 +1079,9 @@ class MergeTacticsEnv:
         SELL_1STAR_PENALTY = -0.8
         sell_penalty = SELL_1STAR_PENALTY if (sold_one_star and not bench_full_pre) else 0.0
 
+        SELL_2STAR_REWARD = 0.5
+        sell_reward = SELL_2STAR_REWARD if (sold_two_star) else 0.0
+
         pointless_swap_penalty = 0.0
         if action_desc.startswith("Swap"):
             no_progress = (
@@ -1082,7 +1093,7 @@ class MergeTacticsEnv:
             if no_progress:
                 pointless_swap_penalty = -0.6
 
-        tick_penalty = -0.03
+        tick_penalty = -0.01
 
         step_reward = (
             networth_reward
@@ -1092,6 +1103,7 @@ class MergeTacticsEnv:
             + board_value_delta_reward
             + buy_reward
             + sell_penalty
+            + sell_reward
             + pointless_swap_penalty
             + tick_penalty
         )
@@ -1100,7 +1112,7 @@ class MergeTacticsEnv:
             f"  - Reward: {step_reward:.3f} "
             f"(ΔNet: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
             f"ΔSlots: {board_slots_delta_reward:.3f}, ΔTraits: {trait_delta_reward:.3f}, "
-            f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty:.3f} "
+            f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty + sell_reward:.3f} "
             f"| phase={phase} round={getattr(next_game_state, 'round', 0)})"
         )
         print("==============================================================================================\n")
