@@ -1068,7 +1068,7 @@ class MergeTacticsEnv:
         BUY_COMMIT_REWARD = 0.2
         buy_reward = BUY_COMMIT_REWARD if (bought and (curr_net - prev_net) > 0) else 0.0
 
-        SELL_1STAR_PENALTY = -1
+        SELL_1STAR_PENALTY = -0.8
         sell_penalty = SELL_1STAR_PENALTY if (sold_one_star and not bench_full_pre) else 0.0
 
         pointless_swap_penalty = 0.0
@@ -1080,9 +1080,9 @@ class MergeTacticsEnv:
                 abs(board_value_delta_reward) < 1e-6
             )
             if no_progress:
-                pointless_swap_penalty = -0.05
+                pointless_swap_penalty = -0.6
 
-        tick_penalty = -0.01
+        tick_penalty = -0.03
 
         step_reward = (
             networth_reward
@@ -1118,9 +1118,9 @@ def train(episodes: int = 3,
           batch_size: int = 64,
           start_training_after: int = 500,
           train_every_steps: int = 8,
-          epsilon_start: float = 0.9,
+          epsilon_start: float = 0.95,
           epsilon_final: float = 0.05,
-          epsilon_decay_steps: int = 10_000,
+          epsilon_decay_steps: int = 20_000, # ~200 episodes
           weights=None, eval_mode=False):
 
     agent = DQNAgent(STATE_SIZE, ACTION_SIZE)
