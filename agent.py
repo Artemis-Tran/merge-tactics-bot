@@ -138,7 +138,7 @@ def save_checkpoint(agent, episode, filename):
 # -------------------------------------------------------------------
 # Action Masking
 # -------------------------------------------------------------------
-def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker) -> np.ndarray:
+def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recent_swap: Optional[Tuple[int, int]] = None, cap: int = 2) -> np.ndarray:
     """Returns a boolean array where True indicates a valid action."""
     mask = np.zeros(ACTION_SIZE, dtype=bool)
 
@@ -218,24 +218,45 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker) -> np
             mask[sell_bench_base + j] = True
 
     # Swaps (deploy only)
+    swap_base = NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS
     for bench_idx in range(LOGICAL_BENCH_SLOTS):
-        if tracker.bench_stars[bench_idx] > 0:
-            for board_idx in range(num_occupied_board):
-                mask[swap_base + (bench_idx * LOGICAL_BOARD_SLOTS) + board_idx] = True
+        if tracker.bench_stars[bench_idx] == 0:
+            continue  # empty bench slot can't be swapped
+
+        for board_logical_idx in range(LOGICAL_BOARD_SLOTS):
+            k = swap_base + bench_idx * LOGICAL_BOARD_SLOTS + board_logical_idx
+            mask[k] = False
+
+            board_has_unit = tracker.board_stars[board_logical_idx] > 0
+            if not board_has_unit:
+                continue
+
+            # block the immediately repeated exact same swap pair
+            if recent_swap == (bench_idx, board_logical_idx):
+                continue
+
+            mask[k] = True
 
     # Move Bench -> Front/Back Row
+    board_count = sum(1 for s in tracker.board_stars if s > 0)
+    under_cap = board_count < cap
+   
     for bench_idx in range(LOGICAL_BENCH_SLOTS):
-        if tracker.bench_stars[bench_idx] > 0:
-            label = tracker.bench_labels[bench_idx]
-            front_idx = move_base + bench_idx
-            back_idx  = move_base + LOGICAL_BENCH_SLOTS + bench_idx
+        if tracker.bench_stars[bench_idx] == 0:
+            continue
 
+        label = tracker.bench_labels[bench_idx]
+        front_idx = move_base + bench_idx
+        back_idx  = move_base + LOGICAL_BENCH_SLOTS + bench_idx
+
+        mask[front_idx] = False
+        mask[back_idx]  = False
+
+        if under_cap:
             if is_melee(label):
-                mask[front_idx] = True         # melee → front only
-                mask[back_idx]  = False
-            elif is_ranged(label):
-                mask[front_idx] = False
-                mask[back_idx]  = True         # ranged → back only
+                mask[front_idx] = True
+            if is_ranged(label):
+                mask[back_idx] = True
     return mask
 
 
@@ -601,10 +622,12 @@ class DQNAgent:
 class MergeTacticsEnv:
     vision: Vision
     tracker: BoardBenchTracker
+    last_swap_pair: Optional[Tuple[int, int]] = None
 
     def reset(self) -> Tuple[np.ndarray, env.GameState]:
         self.tracker = BoardBenchTracker.fresh()
         self.max_desired_board_seen = 2
+        self.last_swap_pair = None
 
         max_rf_attempts = 5         # limit roboflow attempts per cycle
         max_play_again_attempts = 2 # try play_again() up to twice
@@ -912,6 +935,7 @@ class MergeTacticsEnv:
                 board_logical_idx = tmp % LOGICAL_BOARD_SLOTS
                 action_desc = f"Swap Bench {bench_idx} ↔ Board {board_logical_idx}"
                 self._swap_units(bench_idx, board_logical_idx)
+                self.last_swap_pair = (bench_idx, board_logical_idx)
             else:
                 # New movement actions region
                 base_idx = action - (
@@ -935,6 +959,8 @@ class MergeTacticsEnv:
                         action_desc = "NoOp (unknown action region)"
 
         print(f"Action: {action_desc}")
+        if not action_desc.startswith("Swap"):
+            self.last_swap_pair = None
 
         # Observe next state
         time.sleep(0.4) # Allow UI to update
@@ -976,7 +1002,6 @@ class MergeTacticsEnv:
                 print(f"    - slot {j}: {label or 'None'} ★{stars}")
         else:
             print("    (empty)")
-        print("-------------------------------------------------------------------")
 
         # --- Trait State Tracking -------------------------------------------------
         trait_counts = {trait: 0 for trait in ALL_TRAITS}
@@ -995,7 +1020,6 @@ class MergeTacticsEnv:
                 print(f"    - {trait}: {count} ({level})")
         if not active_any:
             print("    (none)")
-        print("===================================================================\n")
 
         num_level1 = 0
         num_level2 = 0
@@ -1012,9 +1036,9 @@ class MergeTacticsEnv:
         LAMBDA_MANA = 0.5    # how much to value unspent mana vs units
         NET_K = 0.03         # scale for the delta-net-worth reward
 
-        merge_reward = 4 if merged else 0.0
+        merge_reward = 10 if merged else 0.0
         if merged:
-            print("  - MERGE DETECTED! +4 reward")
+            print("  - MERGE DETECTED! +10 reward")
 
         # Compute current values AFTER the action/UI settles:
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
@@ -1047,6 +1071,17 @@ class MergeTacticsEnv:
         SELL_1STAR_PENALTY = -1
         sell_penalty = SELL_1STAR_PENALTY if (sold_one_star and not bench_full_pre) else 0.0
 
+        pointless_swap_penalty = 0.0
+        if action_desc.startswith("Swap"):
+            no_progress = (
+                abs(networth_reward) < 1e-6 and
+                abs(board_slots_delta_reward) < 1e-6 and
+                abs(trait_delta_reward) < 1e-6 and
+                abs(board_value_delta_reward) < 1e-6
+            )
+            if no_progress:
+                pointless_swap_penalty = -0.05
+
         tick_penalty = -0.01
 
         step_reward = (
@@ -1057,6 +1092,7 @@ class MergeTacticsEnv:
             + board_value_delta_reward
             + buy_reward
             + sell_penalty
+            + pointless_swap_penalty
             + tick_penalty
         )
 
@@ -1067,6 +1103,7 @@ class MergeTacticsEnv:
             f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty:.3f} "
             f"| phase={phase} round={getattr(next_game_state, 'round', 0)})"
         )
+        print("==============================================================================================\n")
         done_flag= False
         next_state_vector = vectorize_state(next_game_state, self.tracker)
         info = {"play_again": bool(will_play_again)}
@@ -1116,12 +1153,17 @@ def train(episodes: int = 3,
             ckpt_path = f"dqn_merge_tactics_ep{episode_index+1}.pt"
             save_checkpoint(agent, episode_index+1, ckpt_path)
         for step_index in range(10_000):
-            print(f"Step {step_index+1}:")
+            cap = env_wrapper.compute_desired_board_for_state(game_state)
+            board_count = sum(1 for s in env_wrapper.tracker.board_stars if s > 0)
+
+            print("==============================================================================================")
+            print(f"Step {step_index+1}: (cap={cap}, board_count={board_count})")
+
             # Epsilon linear schedule
             fraction = min(1.0, global_step_counter / max(1, epsilon_decay_steps))
             epsilon = epsilon_start + fraction * (epsilon_final - epsilon_start)
 
-            action_mask = get_action_mask(game_state, env_wrapper.tracker)
+            action_mask = get_action_mask(game_state, env_wrapper.tracker, env_wrapper.last_swap_pair, cap)
             if np.count_nonzero(action_mask) == 1 and action_mask[0]:
                 print("[train] Forced NoOp (only NoOp valid). Advancing passively.")
                 next_state_vector, next_game_state, reward_value, done_flag, info = \
