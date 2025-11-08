@@ -149,8 +149,6 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
         return mask
 
     phase = getattr(game_state, "phase", None)
-    if not phase or phase not in ("deploy", "battle"):
-        return mask
 
     # Index helpers
     BUY_GENERIC_IDX = 1       # NoOp is 0
