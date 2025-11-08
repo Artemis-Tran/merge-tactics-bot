@@ -76,7 +76,7 @@ LOGICAL_BENCH_SLOTS = 5               # we only expose 5 bench slots
 MAX_HAND_SLOTS = 6
 
 # Action space layout
-NUM_BUY_ACTIONS = 1
+NUM_BUY_ACTIONS = 2
 NUM_SELL_BOARD_ACTIONS = LOGICAL_BOARD_SLOTS
 NUM_SELL_BENCH_ACTIONS = LOGICAL_BENCH_SLOTS
 NUM_SWAP_ACTIONS = LOGICAL_BENCH_SLOTS * LOGICAL_BOARD_SLOTS
@@ -153,7 +153,8 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
         return mask
 
     # Index helpers
-    BUY_BENCH_IDX = 1  # since 0 is NoOp and NUM_BUY_ACTIONS == 1
+    BUY_GENERIC_IDX = 1       # NoOp is 0
+    BUY_MERGE_IDX   = 2 
 
     sell_board_base = 1 + NUM_BUY_ACTIONS
     sell_bench_base = sell_board_base + NUM_SELL_BOARD_ACTIONS
@@ -190,22 +191,33 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
     print(f"[mask] mana={current_mana} hand={debug_cards}")
     can_buy = any(card_affordable(c) for c in game_state.cards[:MAX_HAND_SLOTS])
 
-    if phase == "battle":
-        # --- BATTLE: Only bench-safe actions ---
-        # Buy -> Bench
-        if can_buy and sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS:
-            mask[BUY_BENCH_IDX] = True
+    bench_has_space = sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS
 
-        # Sell Bench
+    affordable_merge = any(
+        getattr(c, "upgradable", False) and card_affordable(c)
+        for c in game_state.cards[:MAX_HAND_SLOTS]
+    )
+    affordable_generic = any(
+        (not getattr(c, "upgradable", False)) and card_affordable(c)
+        for c in game_state.cards[:MAX_HAND_SLOTS]
+    )
+
+    # Battle phase: allow only bench-safe buys
+    if phase == "battle":
+        if bench_has_space and affordable_generic:
+            mask[BUY_GENERIC_IDX] = True
+        if bench_has_space and affordable_merge:
+            mask[BUY_MERGE_IDX] = True
         for j in range(LOGICAL_BENCH_SLOTS):
             if tracker.bench_stars[j] > 0:
                 mask[sell_bench_base + j] = True
-
         return mask
 
-    # --- DEPLOY: bench buy is allowed; board buy is removed ---
-    if can_buy and sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS:
-        mask[BUY_BENCH_IDX] = True
+    # Deploy phase
+    if bench_has_space and affordable_generic:
+        mask[BUY_GENERIC_IDX] = True
+    if bench_has_space and affordable_merge:
+        mask[BUY_MERGE_IDX] = True
 
     # Sell Board
     for i in range(LOGICAL_BOARD_SLOTS):
@@ -820,6 +832,56 @@ class MergeTacticsEnv:
                     bought = True
 
         return merged, bought
+    
+    def _select_merge_hand_index(self, game_state, current_mana: int) -> int | None:
+        """Pick best merge candidate (upgradable=True), prefer higher cost then leftmost."""
+        candidates = []
+        for hand_index, card in enumerate(game_state.cards[:MAX_HAND_SLOTS]):
+            label = getattr(card, "label", None)
+            if not label or not getattr(card, "upgradable", False):
+                continue
+            cost = CARD_COSTS.get(label, 9999)
+            if cost <= current_mana:
+                candidates.append((cost, -hand_index, hand_index))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)  # highest cost, then leftmost
+        return candidates[0][2]
+
+    def _select_generic_hand_index(self, game_state, current_mana: int) -> int | None:
+        """
+        Pick best non-merge purchase.
+        Heuristic:
+        - must be affordable
+        - must NOT be upgradable (we reserve those for the merge action)
+        - prefer cards that add trait synergy already present on board
+        - break ties by higher cost, then leftmost
+        """
+        # Build board trait counts
+        trait_counts = {t: 0 for t in ALL_TRAITS}
+        for label in self.tracker.board_labels:
+            if label in CARD_TRAITS:
+                for t in CARD_TRAITS[label]:
+                    if t:
+                        trait_counts[t] += 1
+
+        def trait_synergy_score(label: str) -> int:
+            traits = CARD_TRAITS.get(label, [])
+            return sum(1 for t in traits if t and trait_counts.get(t, 0) > 0)
+
+        candidates = []
+        for hand_index, card in enumerate(game_state.cards[:MAX_HAND_SLOTS]):
+            label = getattr(card, "label", None)
+            if not label or getattr(card, "upgradable", False):
+                continue  # exclude merges from generic buys
+            cost = CARD_COSTS.get(label, 9999)
+            if cost <= current_mana:
+                synergy = trait_synergy_score(label)
+                candidates.append((synergy, cost, -hand_index, hand_index))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)  # highest synergy, then higher cost, then leftmost
+        return candidates[0][3]
 
 
     def _swap_units(self, bench_idx: int, board_logical_idx: int):
@@ -908,16 +970,24 @@ class MergeTacticsEnv:
             pass  # Action 0 is No-op
         else:
             action = action_index - 1 
-            if action < NUM_BUY_ACTIONS:  # Only: Buy -> Bench
-                hand_index = self._first_nonempty_hand_index(last_game_state)
-                if hand_index is not None:
-                    card = last_game_state.cards[hand_index]
-                    label = getattr(card, "label", None)
-                    mana = int(getattr(last_game_state, "mana", 0) or 0)
-                    if label and CARD_COSTS.get(label, 9999) <= mana:
-                        action_desc = f"Buy {label} to Bench"
+            if action < NUM_BUY_ACTIONS:
+                current_mana = int(getattr(last_game_state, "mana", 0) or 0)
+                if action == 0:
+                    hand_index = self._select_generic_hand_index(last_game_state, current_mana)
+                    if hand_index is not None:
+                        card = last_game_state.cards[hand_index]
+                        action_desc = f"BuyGEN {card.label} to Bench"
                         merged, bought = self._buy_from_hand(hand_index, card)
-
+                    else:
+                        action_desc = "BuyGEN invalid (no affordable non-merge)"
+                else:
+                    hand_index = self._select_merge_hand_index(last_game_state, current_mana)
+                    if hand_index is not None:
+                        card = last_game_state.cards[hand_index]
+                        action_desc = f"BuyMERGE {card.label} to Bench"
+                        merged, bought = self._buy_from_hand(hand_index, card)
+                    else:
+                        action_desc = "BuyMERGE invalid (no affordable merge)"
 
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS:
                 board_slot = action - NUM_BUY_ACTIONS
@@ -1081,6 +1151,39 @@ class MergeTacticsEnv:
         SELL_2STAR_REWARD = 0.5
         sell_reward = SELL_2STAR_REWARD if (sold_two_star) else 0.0
 
+        cap_now = self.compute_desired_board_for_state(next_game_state)
+        board_count_now = sum(1 for s in self.tracker.board_stars if s > 0)
+        missing_slots = max(0, cap_now - board_count_now)
+
+        health_now = int(getattr(next_game_state, "health", 100) or 100)
+        is_deploy = (getattr(next_game_state, "phase", None) == "deploy")
+
+        def _any_affordable(card_list, mana_val):
+            for c in card_list[:MAX_HAND_SLOTS]:
+                lab = getattr(c, "label", None)
+                if not lab:
+                    continue
+                cost = CARD_COSTS.get(lab, 9999)
+                if cost <= mana_val:
+                    return True
+            return False
+
+        bench_has_unit = any(star > 0 for star in self.tracker.bench_stars)
+        can_afford_any = _any_affordable(next_game_state.cards, current_mana)
+        under_cap_now = board_count_now < cap_now
+        can_progress_now = under_cap_now and (bench_has_unit or can_afford_any)
+
+        # Static penalty only when it's actionable and we're low on health
+        UNDEFILL_BETA = 1.0  
+        undefill_penalty = 0.0
+        if is_deploy and health_now <= 50 and can_progress_now and missing_slots > 0:
+            undefill_penalty = -UNDEFILL_BETA * float(missing_slots)
+
+        # Also amplify your existing ΔSlots reward when low health
+        LOW_HEALTH_MULT = 2.0  # double the ΔSlots incentive when <=50% HP
+        if health_now <= 50:
+            board_slots_delta_reward *= LOW_HEALTH_MULT
+
         pointless_swap_penalty = 0.0
         if action_desc.startswith("Swap"):
             no_progress = (
@@ -1104,6 +1207,7 @@ class MergeTacticsEnv:
             + sell_penalty
             + sell_reward
             + pointless_swap_penalty
+            + undefill_penalty
             + tick_penalty
         )
 
@@ -1112,6 +1216,7 @@ class MergeTacticsEnv:
             f"(ΔNet: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
             f"ΔSlots: {board_slots_delta_reward:.3f}, ΔTraits: {trait_delta_reward:.3f}, "
             f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty + sell_reward:.3f} "
+            f"Underfill: {undefill_penalty:.3f}, Swap: {pointless_swap_penalty:.3f}) "
             f"| phase={phase} round={getattr(next_game_state, 'round', 0)})"
         )
         print("==============================================================================================\n")
