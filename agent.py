@@ -218,7 +218,6 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
             mask[sell_bench_base + j] = True
 
     # Swaps (deploy only)
-    swap_base = NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS + NUM_SELL_BENCH_ACTIONS
     for bench_idx in range(LOGICAL_BENCH_SLOTS):
         if tracker.bench_stars[bench_idx] == 0:
             continue  # empty bench slot can't be swapped
