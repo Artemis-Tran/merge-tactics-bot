@@ -30,6 +30,7 @@ import random
 import time
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+from enum import Enum, auto
 
 import numpy as np
 import torch
@@ -76,7 +77,7 @@ LOGICAL_BENCH_SLOTS = 5               # we only expose 5 bench slots
 MAX_HAND_SLOTS = 6
 
 # Action space layout
-NUM_BUY_ACTIONS = 2
+NUM_BUY_ACTIONS = 4
 NUM_SELL_BOARD_ACTIONS = LOGICAL_BOARD_SLOTS
 NUM_SELL_BENCH_ACTIONS = LOGICAL_BENCH_SLOTS
 NUM_SWAP_ACTIONS = LOGICAL_BENCH_SLOTS * LOGICAL_BOARD_SLOTS
@@ -151,8 +152,10 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
     phase = getattr(game_state, "phase", None)
 
     # Index helpers
-    BUY_GENERIC_IDX = 1       # NoOp is 0
-    BUY_MERGE_IDX   = 2 
+    BUY_CHEAP_IDX = 1
+    BUY_TRAIT_IDX = 2
+    BUY_MERGE_IDX = 3
+    BUY_3STAR_IDX = 4  # progress toward 3★ (no immediate merge)
 
     sell_board_base = 1 + NUM_BUY_ACTIONS
     sell_bench_base = sell_board_base + NUM_SELL_BOARD_ACTIONS
@@ -187,35 +190,61 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
         for c in game_state.cards[:MAX_HAND_SLOTS]
     ]
     print(f"[mask] mana={current_mana} hand={debug_cards}")
-    can_buy = any(card_affordable(c) for c in game_state.cards[:MAX_HAND_SLOTS])
 
     bench_has_space = sum(1 for s in tracker.bench_stars if s > 0) < LOGICAL_BENCH_SLOTS
 
-    affordable_merge = any(
-        getattr(c, "upgradable", False) and card_affordable(c)
-        for c in game_state.cards[:MAX_HAND_SLOTS]
-    )
+    # Non-merge affordability
     affordable_generic = any(
         (not getattr(c, "upgradable", False)) and card_affordable(c)
         for c in game_state.cards[:MAX_HAND_SLOTS]
     )
 
-    # Battle phase: allow only bench-safe buys
+    # Immediate merge affordability (2★ or 3★ on purchase)
+    affordable_merge = any(
+        getattr(c, "upgradable", False) and card_affordable(c)
+        for c in game_state.cards[:MAX_HAND_SLOTS]
+    )
+
+    # Labels you currently have at exactly 2★ (on board or bench)
+    two_star_labels = set()
+    for i, lbl in enumerate(tracker.board_labels):
+        if lbl and tracker.board_stars[i] == 2:
+            two_star_labels.add(lbl)
+    for j, lbl in enumerate(tracker.bench_labels):
+        if lbl and tracker.bench_stars[j] == 2:
+            two_star_labels.add(lbl)
+
+    # Progress-to-3★ candidates: same label as a 2★ you own, affordable,
+    # and WILL NOT merge immediately (upgradable=False)
+    affordable_3star_progress = any(
+        (getattr(c, "label", None) in two_star_labels)
+        and (not getattr(c, "upgradable", False))
+        and card_affordable(c)
+        for c in game_state.cards[:MAX_HAND_SLOTS]
+    )
+
+
     if phase == "battle":
         if bench_has_space and affordable_generic:
-            mask[BUY_GENERIC_IDX] = True
+            mask[BUY_CHEAP_IDX] = True
+            mask[BUY_TRAIT_IDX] = True
         if bench_has_space and affordable_merge:
             mask[BUY_MERGE_IDX] = True
-        for j in range(LOGICAL_BENCH_SLOTS):
-            if tracker.bench_stars[j] > 0:
-                mask[sell_bench_base + j] = True
+        if bench_has_space and affordable_3star_progress:
+            mask[BUY_3STAR_IDX] = True
+        # (keep your Sell Bench enables)
+        ...
         return mask
 
-    # Deploy phase
+    # deploy phase
     if bench_has_space and affordable_generic:
-        mask[BUY_GENERIC_IDX] = True
+        mask[BUY_CHEAP_IDX] = True
+        mask[BUY_TRAIT_IDX] = True
     if bench_has_space and affordable_merge:
         mask[BUY_MERGE_IDX] = True
+    if bench_has_space and affordable_3star_progress:
+        mask[BUY_3STAR_IDX] = True
+
 
     # Sell Board
     for i in range(LOGICAL_BOARD_SLOTS):
@@ -633,6 +662,12 @@ class MergeTacticsEnv:
     tracker: BoardBenchTracker
     last_swap_pair: Optional[Tuple[int, int]] = None
 
+    class BuyStrategy(Enum):
+        CHEAP = auto()      # cheapest non-merge
+        TRAIT = auto()      # trait-first non-merge
+        MERGE = auto()      # immediate merge (upgradable=True)
+        PROGRESS3 = auto()  # buy toward 3★ when you already have a 2★ (no immediate merge)
+
     def reset(self) -> Tuple[np.ndarray, env.GameState]:
         self.tracker = BoardBenchTracker.fresh()
         self.max_desired_board_seen = 2
@@ -831,31 +866,15 @@ class MergeTacticsEnv:
 
         return merged, bought
     
-    def _select_merge_hand_index(self, game_state, current_mana: int) -> int | None:
-        """Pick best merge candidate (upgradable=True), prefer higher cost then leftmost."""
-        candidates = []
-        for hand_index, card in enumerate(game_state.cards[:MAX_HAND_SLOTS]):
-            label = getattr(card, "label", None)
-            if not label or not getattr(card, "upgradable", False):
-                continue
-            cost = CARD_COSTS.get(label, 9999)
-            if cost <= current_mana:
-                candidates.append((cost, -hand_index, hand_index))
-        if not candidates:
-            return None
-        candidates.sort(reverse=True)  # highest cost, then leftmost
-        return candidates[0][2]
-
-    def _select_generic_hand_index(self, game_state, current_mana: int) -> int | None:
+    def _select_hand_index(self, game_state, current_mana: int, strategy: "MergeTacticsEnv.BuyStrategy") -> int | None:
         """
-        Pick best non-merge purchase.
-        Heuristic:
-        - must be affordable
-        - must NOT be upgradable (we reserve those for the merge action)
-        - prefer cards that add trait synergy already present on board
-        - break ties by higher cost, then leftmost
+        Unified hand selector based on a strategy.
+        - CHEAP:     lowest cost non-merge, tie leftmost
+        - TRAIT:     highest trait synergy non-merge, tie lower cost, then leftmost
+        - MERGE:     upgradable=True, prefer higher cost, then leftmost
+        - PROGRESS3: matches a label at exactly 2★ that will NOT immediately merge; prefer lower cost, then leftmost
         """
-        # Build board trait counts
+        # Build trait counts from board for synergy scoring
         trait_counts = {t: 0 for t in ALL_TRAITS}
         for label in self.tracker.board_labels:
             if label in CARD_TRAITS:
@@ -867,20 +886,60 @@ class MergeTacticsEnv:
             traits = CARD_TRAITS.get(label, [])
             return sum(1 for t in traits if t and trait_counts.get(t, 0) > 0)
 
-        candidates = []
+        # Collect labels at exactly 2★ on board or bench (targets for PROGRESS3)
+        two_star_labels = set()
+        for i, lbl in enumerate(self.tracker.board_labels):
+            if lbl and self.tracker.board_stars[i] == 2:
+                two_star_labels.add(lbl)
+        for j, lbl in enumerate(self.tracker.bench_labels):
+            if lbl and self.tracker.bench_stars[j] == 2:
+                two_star_labels.add(lbl)
+
+        candidates: list[tuple] = []
+
         for hand_index, card in enumerate(game_state.cards[:MAX_HAND_SLOTS]):
             label = getattr(card, "label", None)
-            if not label or getattr(card, "upgradable", False):
-                continue  # exclude merges from generic buys
+            if not label:
+                continue
             cost = CARD_COSTS.get(label, 9999)
-            if cost <= current_mana:
+            if cost > current_mana:
+                continue
+            is_upgradable = bool(getattr(card, "upgradable", False))
+
+            if strategy is self.BuyStrategy.CHEAP:
+                if is_upgradable:
+                    continue
+                # key: (cost, hand_index)
+                candidates.append((cost, hand_index))
+
+            elif strategy is self.BuyStrategy.TRAIT:
+                if is_upgradable:
+                    continue
                 synergy = trait_synergy_score(label)
-                candidates.append((synergy, cost, -hand_index, hand_index))
+                # key: (-synergy, cost, hand_index)  -> highest synergy, then lowest cost, then leftmost
+                candidates.append((-synergy, cost, hand_index))
+
+            elif strategy is self.BuyStrategy.MERGE:
+                if not is_upgradable:
+                    continue
+                # Prefer higher-cost merges (usually better tempo); tie leftmost
+                # key: (-cost, hand_index) -> highest cost first via negative
+                candidates.append((-cost, hand_index))
+
+            elif strategy is self.BuyStrategy.PROGRESS3:
+                # Must match a label we have at exactly 2★, and must NOT immediately merge
+                if label not in two_star_labels or is_upgradable:
+                    continue
+                # key: (cost, hand_index) -> cheapest progress, tie leftmost
+                candidates.append((cost, hand_index))
+
         if not candidates:
             return None
-        candidates.sort(reverse=True)  # highest synergy, then higher cost, then leftmost
-        return candidates[0][3]
 
+        candidates.sort()
+        # Extract index depending on tuple shape
+        last_elem = candidates[0][-1]
+        return int(last_elem)
 
     def _swap_units(self, bench_idx: int, board_logical_idx: int):
         """Swaps a unit from the bench with a unit on the board."""
@@ -968,24 +1027,22 @@ class MergeTacticsEnv:
             pass  # Action 0 is No-op
         else:
             action = action_index - 1 
+            strategy_by_action = {
+                0: self.BuyStrategy.CHEAP,
+                1: self.BuyStrategy.TRAIT,
+                2: self.BuyStrategy.MERGE,
+                3: self.BuyStrategy.PROGRESS3,
+            }
             if action < NUM_BUY_ACTIONS:
                 current_mana = int(getattr(last_game_state, "mana", 0) or 0)
-                if action == 0:
-                    hand_index = self._select_generic_hand_index(last_game_state, current_mana)
-                    if hand_index is not None:
-                        card = last_game_state.cards[hand_index]
-                        action_desc = f"BuyGEN {card.label} to Bench"
-                        merged, bought = self._buy_from_hand(hand_index, card)
-                    else:
-                        action_desc = "BuyGEN invalid (no affordable non-merge)"
+                strategy = strategy_by_action[action]
+                hand_index = self._select_hand_index(last_game_state, current_mana, strategy)
+                if hand_index is None:
+                    action_desc = f"Buy{strategy.name} invalid"
                 else:
-                    hand_index = self._select_merge_hand_index(last_game_state, current_mana)
-                    if hand_index is not None:
-                        card = last_game_state.cards[hand_index]
-                        action_desc = f"BuyMERGE {card.label} to Bench"
-                        merged, bought = self._buy_from_hand(hand_index, card)
-                    else:
-                        action_desc = "BuyMERGE invalid (no affordable merge)"
+                    card = last_game_state.cards[hand_index]
+                    action_desc = f"Buy{strategy.name} {card.label} to Bench"
+                    merged, bought = self._buy_from_hand(hand_index, card)
 
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS:
                 board_slot = action - NUM_BUY_ACTIONS
