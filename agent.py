@@ -232,8 +232,10 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
             mask[BUY_MERGE_IDX] = True
         if bench_has_space and affordable_3star_progress:
             mask[BUY_3STAR_IDX] = True
-        # (keep your Sell Bench enables)
-        ...
+        # enable Sell Bench during battle
+        for j in range(LOGICAL_BENCH_SLOTS):
+            if tracker.bench_stars[j] > 0:
+                mask[sell_bench_base + j] = True
         return mask
 
     # deploy phase
@@ -816,6 +818,22 @@ class MergeTacticsEnv:
             if getattr(card, "label", None):
                 return h_idx
         return None
+    
+    def _predict_merge_target_star(self, label: str) -> int | None:
+        """
+        If we buy another copy of `label` and it merges, what star level will it become?
+        Returns 2 or 3 if a merge will occur, else None.
+        Prefers upgrading a bench copy first (matches find_and_upgrade behavior).
+        """
+        # Bench first
+        for j in range(LOGICAL_BENCH_SLOTS):
+            if self.tracker.bench_labels[j] == label and 0 < self.tracker.bench_stars[j] < 3:
+                return self.tracker.bench_stars[j] + 1
+        # Then board
+        for idx in range(BOARD_TILES):
+            if self.tracker.board_labels[idx] == label and 0 < self.tracker.board_stars[idx] < 3:
+                return self.tracker.board_stars[idx] + 1
+        return None
 
     def _sell_board_slot(self, logical_slot: int):
         physical_idx = self._map_logical_board_slot_to_physical_index(logical_slot)
@@ -833,38 +851,48 @@ class MergeTacticsEnv:
         drag(Bench(bench_slot), Hand(0))
         self.tracker.clear_bench_slot(bench_slot)
 
-    def _buy_from_hand(self, hand_index: int, card: env.Card, to_board: bool = False) -> Tuple[bool, bool]:
+    def _buy_from_hand(self, hand_index: int, card: env.Card, to_board: bool = False) -> Tuple[bool, bool, int]:
         """Handles buying a card to board or bench, with merge logic.
-        Returns (merged, bought)."""
+        Returns (merged, bought, merge_to_stars[0|2|3])."""
         merged = False
         bought = False
+        merge_to_stars = 0
 
         if getattr(card, "upgradable", False) and card.label:
-            # This card will cause a merge. The game handles the merge itself when we buy it.
-            drag(Hand(hand_index), Bench(4))  # Drag to a bench slot to buy
+            # Predict whether this will be a 2★ or 3★ result
+            predicted = self._predict_merge_target_star(card.label)
+            bench_slot = self.tracker.first_empty_bench_slot()
+            if bench_slot is None:
+                return merged, bought, merge_to_stars  # no space → abort
+            drag(Hand(hand_index), Bench(bench_slot))
+            # Game performs merge; mirror it in the tracker
             self.tracker.find_and_upgrade(card.label)
             merged = True
             bought = True
-        else:
-            if to_board:
-                if sum(1 for s in self.tracker.board_stars if s > 0) >= LOGICAL_BOARD_SLOTS:
-                    return merged, bought  # logical cap reached
-                board_idx = self.tracker.first_empty_board_index()
-                if board_idx is not None:
-                    row, col = divmod(board_idx, BOARD_COLS)
-                    drag(Hand(hand_index), Board(row, col))
-                    self.tracker.set_board_tile(board_idx, label=card.label, star_level=1)
-                    bought = True
-            else:  # to bench
-                if sum(1 for s in self.tracker.bench_stars if s > 0) >= LOGICAL_BENCH_SLOTS:
-                    return merged, bought
-                bench_slot = self.tracker.first_empty_bench_slot()
-                if bench_slot is not None:
-                    drag(Hand(hand_index), Bench(bench_slot))
-                    self.tracker.set_bench_slot(bench_slot, label=card.label, star_level=1)
-                    bought = True
+            merge_to_stars = int(predicted or 0)
+            return merged, bought, merge_to_stars
 
-        return merged, bought
+        # Non-merge path:
+        if to_board:
+            if sum(1 for s in self.tracker.board_stars if s > 0) >= LOGICAL_BOARD_SLOTS:
+                return merged, bought, merge_to_stars
+            board_idx = self.tracker.first_empty_board_index()
+            if board_idx is not None:
+                row, col = divmod(board_idx, BOARD_COLS)
+                drag(Hand(hand_index), Board(row, col))
+                self.tracker.set_board_tile(board_idx, label=card.label, star_level=1)
+                bought = True
+        else:
+            if sum(1 for s in self.tracker.bench_stars if s > 0) >= LOGICAL_BENCH_SLOTS:
+                return merged, bought, merge_to_stars
+            bench_slot = self.tracker.first_empty_bench_slot()
+            if bench_slot is not None:
+                drag(Hand(hand_index), Bench(bench_slot))
+                self.tracker.set_bench_slot(bench_slot, label=card.label, star_level=1)
+                bought = True
+
+        return merged, bought, merge_to_stars
+
     
     def _select_hand_index(self, game_state, current_mana: int, strategy: "MergeTacticsEnv.BuyStrategy") -> int | None:
         """
@@ -1002,6 +1030,8 @@ class MergeTacticsEnv:
         # Snapshot tracker so we can roll back if UI didn't commit the action.
         tracker_snapshot = copy.deepcopy(self.tracker)
         pre_state_vector = vectorize_state(last_game_state, self.tracker)
+        prev_board_labels = tracker_snapshot.board_labels[:]  # shallow copy is fine (list of scalars)
+        prev_board_stars  = tracker_snapshot.board_stars[:]
 
         bench_full_pre = self._bench_is_full()
         sold_one_star = False
@@ -1016,6 +1046,7 @@ class MergeTacticsEnv:
 
         merged = False
         bought = False
+        merge_to_stars = 0
         last_phase = getattr(last_game_state, "phase", None)
         if last_phase == "battle" and is_board_affecting_action(action_index):
             print(f"[step] Phase=battle → blocking board-affecting action {action_index}; NoOp instead")
@@ -1042,7 +1073,7 @@ class MergeTacticsEnv:
                 else:
                     card = last_game_state.cards[hand_index]
                     action_desc = f"Buy{strategy.name} {card.label} to Bench"
-                    merged, bought = self._buy_from_hand(hand_index, card)
+                    merged, bought, merge_to_stars = self._buy_from_hand(hand_index, card)
 
             elif action < NUM_BUY_ACTIONS + NUM_SELL_BOARD_ACTIONS:
                 board_slot = action - NUM_BUY_ACTIONS
@@ -1168,9 +1199,48 @@ class MergeTacticsEnv:
         LAMBDA_MANA = 0.5    # how much to value unspent mana vs units
         NET_K = 0.03         # scale for the delta-net-worth reward
 
-        merge_reward = 10 if merged else 0.0
+        MERGE_TO2_REWARD = 8.0
+        MERGE_TO3_REWARD = 20.0
+
         if merged:
-            print("  - MERGE DETECTED! +10 reward")
+            if merge_to_stars == 3:
+                merge_reward = MERGE_TO3_REWARD
+                print(f"  - MERGE 3★! +{MERGE_TO3_REWARD} reward")
+            elif merge_to_stars == 2:
+                merge_reward = MERGE_TO2_REWARD
+                print(f"  - MERGE 2★! +{MERGE_TO2_REWARD} reward")
+            else:
+                # Fallback, should not happen if upgradable was True
+                merge_reward = 10.0
+                print("  - MERGE DETECTED (unknown tier). +10 reward")
+        else:
+            merge_reward = 0.0
+
+        progress3_bonus = 0.0
+        if bought and not merged and action_desc.startswith("Buy3STAR"):
+            progress3_bonus = 0.4  # small nudge for progressing toward 3★
+
+        DEPLOY_STAR_W = 2     # per-star placement bonus
+        DEPLOY_VALUE_K = 0.1  # modest cost-weighted nudge
+        URGENCY_GAIN = 2
+
+        deploy_bonus = 0.0
+
+        if phase == "deploy":
+            # base deploy bonus for newly placed board tiles
+            for idx in range(BOARD_TILES):
+                if prev_board_stars[idx] == 0 and self.tracker.board_stars[idx] > 0:
+                    placed_stars = self.tracker.board_stars[idx]
+                    placed_label = self.tracker.board_labels[idx]
+                    placed_cost  = CARD_COSTS.get(placed_label, 0)
+                    deploy_bonus += DEPLOY_STAR_W * placed_stars + DEPLOY_VALUE_K * placed_cost
+
+        # urgency scaling: timer goes 100 -> 0
+        raw_timer = getattr(next_game_state, "timer", 100)
+        time_left = float(raw_timer if raw_timer is not None else 100.0)
+        # 0.0 at start (100), 1.0 near end (0)
+        urgency = min(1.0, max(0.0, (100.0 - time_left) / 100.0))
+        deploy_bonus *= (1.0 + URGENCY_GAIN * urgency)
 
         # Compute current values AFTER the action/UI settles:
         current_mana = int(getattr(next_game_state, "mana", 0.0) or 0.0)
@@ -1179,7 +1249,7 @@ class MergeTacticsEnv:
         prev_net = prev_total_unit_value + LAMBDA_MANA * prev_mana
         networth_reward = NET_K * (curr_net - prev_net)
 
-        ALPHA_SLOTS = 0.6
+        ALPHA_SLOTS = 1.4
         curr_board_slots = logical_board_count(self.tracker)
         board_slots_delta_reward = ALPHA_SLOTS * float(curr_board_slots - prev_board_slots)
 
@@ -1191,7 +1261,7 @@ class MergeTacticsEnv:
         if phase == "battle":
             trait_delta_reward = DELTA_L1_W * (curr_l1 - prev_l1) + DELTA_L2_W * (curr_l2 - prev_l2)
 
-        DELTA_BOARD_VALUE_K = 0.01
+        DELTA_BOARD_VALUE_K = 1
         curr_board_value = calculate_board_value(self.tracker)
         board_value_delta_reward = 0.0
         if phase == "battle":
@@ -1231,7 +1301,7 @@ class MergeTacticsEnv:
         # Static penalty only when it's actionable and we're low on health
         UNDEFILL_BETA = 1.0  
         undefill_penalty = 0.0
-        if is_deploy and health_now <= 50 and can_progress_now and missing_slots > 0:
+        if is_deploy and health_now < 50 and can_progress_now and missing_slots > 0:
             undefill_penalty = -UNDEFILL_BETA * float(missing_slots)
 
         # Also amplify your existing ΔSlots reward when low health
@@ -1255,6 +1325,7 @@ class MergeTacticsEnv:
         step_reward = (
             networth_reward
             + merge_reward
+            + progress3_bonus
             + board_slots_delta_reward
             + trait_delta_reward
             + board_value_delta_reward
@@ -1268,11 +1339,19 @@ class MergeTacticsEnv:
 
         print(
             f"  - Reward: {step_reward:.3f} "
-            f"(ΔNet: {networth_reward:.3f}, Merge: {merge_reward:.3f}, "
-            f"ΔSlots: {board_slots_delta_reward:.3f}, ΔTraits: {trait_delta_reward:.3f}, "
-            f"ΔBoardVal: {board_value_delta_reward:.3f}, Buy: {buy_reward:.3f}, Sell: {sell_penalty + sell_reward:.3f} "
-            f"Underfill: {undefill_penalty:.3f}, Swap: {pointless_swap_penalty:.3f}) "
-            f"| phase={phase} round={getattr(next_game_state, 'round', 0)})"
+            f"(ΔNet: {networth_reward:.3f}, "
+            f"Merge: {merge_reward:.3f}, "
+            f"3★Prog: {progress3_bonus:.3f}, "
+            f"ΔSlots: {board_slots_delta_reward:.3f}, "
+            f"ΔTraits: {trait_delta_reward:.3f}, "
+            f"ΔBoardVal: {board_value_delta_reward:.3f}, "
+            f"Deploy: {deploy_bonus:.3f}, "
+            f"Buy: {buy_reward:.3f}, "
+            f"Sell: {sell_penalty + sell_reward:.3f}, "
+            f"Underfill: {undefill_penalty:.3f}, "
+            f"Swap: {pointless_swap_penalty:.3f}) "
+            f"| phase={phase}, round={getattr(next_game_state, 'round', 0)}, "
+            f"timer={int(time_left) if phase == 'deploy' else '—'})"
         )
         print("==============================================================================================\n")
         done_flag= False
