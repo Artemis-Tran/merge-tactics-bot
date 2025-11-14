@@ -1351,7 +1351,7 @@ class MergeTacticsEnv:
             f"Underfill: {undefill_penalty:.3f}, "
             f"Swap: {pointless_swap_penalty:.3f}) "
             f"| phase={phase}, round={getattr(next_game_state, 'round', 0)}, "
-            f"timer={int(time_left) if phase == 'deploy' else '—'})"
+            f"timer={int(time_left)})"
         )
         print("==============================================================================================\n")
         done_flag= False
