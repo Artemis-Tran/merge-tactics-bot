@@ -673,7 +673,8 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
 
     best_phase, best_score = None, -1.0
     for phase_name, path in (("battle", "assets/templates/battle.png"),
-                             ("deploy", "assets/templates/deploy.png")):
+                             ("deploy", "assets/templates/deploy.png"),
+                             ("prepare", "assets/templates/prepare.png")):
         tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if tmpl is None:
             continue

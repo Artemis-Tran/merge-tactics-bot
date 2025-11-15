@@ -150,6 +150,12 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
         return mask
 
     phase = getattr(game_state, "phase", None)
+    if phase == "prepare":
+        return mask
+    
+    valid = validate_state(game_state)
+    if not valid:
+        return mask
 
     # Index helpers
     BUY_CHEAP_IDX = 1
@@ -675,7 +681,7 @@ class MergeTacticsEnv:
         self.max_desired_board_seen = 2
         self.last_swap_pair = None
 
-        max_rf_attempts = 5         # limit roboflow attempts per cycle
+        max_rf_attempts = 10         # limit roboflow attempts per cycle
         max_play_again_attempts = 2 # try play_again() up to twice
 
         play_again_attempts = 0
