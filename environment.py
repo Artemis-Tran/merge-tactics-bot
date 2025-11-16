@@ -660,7 +660,7 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     text, conf = _match_digit(roi, TESS_MULTI)
 
     round_num = None
-    if conf > 60:
+    if conf > 85:
         round_num = int(text)
 
     # Phase (battle/deploy) 
