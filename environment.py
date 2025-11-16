@@ -668,7 +668,6 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     text, conf = _match_digit(roi, ROUND_DIGIT_TEMPLATES_DIR)
 
     round_num = None
-    print("Round conf:", conf)
     if conf > 85:
         round_num = int(text)
 
