@@ -32,15 +32,15 @@ from inference_sdk import InferenceHTTPClient
 GEOM_PATH = Path("geometry.json")
 END_GEOM_PATH = Path("end-screen-geometry.json")
 HOME_GEOM_PATH = Path("home-screen-geometry.json")
-TEMPLATES_DIR = Path("assets/templates")
+ROUND_DIGIT_TEMPLATES_DIR = Path("assets/templates/digit/round")
+MANA_DIGIT_TEMPLATES_DIR = Path("assets/templates/digit/mana")
 RUNS_DIR = Path("runs") / "vision"
 CARD_REFS_DIR = Path("assets/cards")  
 CARDS_INFO_PATH = Path("cards.json")
 _CARD_INFO: dict[str, dict] | None = None
-_TMPL_CACHE: Optional[Dict[int, np.ndarray]] = None
-TESS_MULTI  = "--psm 10  --oem 1 -c tessedit_char_whitelist=0123456789"
+_TMPL_CACHE: Dict[Path, Dict[int, np.ndarray]] = {}
 
-TEMPLATE_0_PATH = os.path.join("assets", "templates", "0.png")
+TEMPLATE_0_PATH = os.path.join("assets", "templates", "digit", "mana", "0.png")
 TEMPLATE_0 = cv2.imread(TEMPLATE_0_PATH, cv2.IMREAD_GRAYSCALE)
 
 if TEMPLATE_0 is None:
@@ -159,19 +159,28 @@ def _clean_roi(img: np.ndarray) -> np.ndarray:
     return res
 
 
-def load_digit_templates(dirpath: Path = TEMPLATES_DIR) -> dict[int, np.ndarray]:
+def load_digit_templates(dirpath: Path = MANA_DIGIT_TEMPLATES_DIR) -> Dict[int, np.ndarray]:
+    """
+    Load digit templates from the given directory and cache per directory path.
+    Directory must contain 0.png ... 9.png.
+    """
     global _TMPL_CACHE
-    if _TMPL_CACHE is not None:
-        return _TMPL_CACHE
-    tmpls: dict[int, np.ndarray] = {}
-    for d in range(10):
-        p = dirpath / f"{d}.png"
-        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise FileNotFoundError(f"Could not read digit template: {p}")
-        tmpls[d] = img
-    _TMPL_CACHE = tmpls
-    return tmpls
+    dirpath = dirpath.resolve()
+
+    if dirpath in _TMPL_CACHE:
+        return _TMPL_CACHE[dirpath]
+
+    templates_for_directory: Dict[int, np.ndarray] = {}
+    for digit_value in range(10):
+        template_path = dirpath / f"{digit_value}.png"
+        template_image = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
+        if template_image is None:
+            raise FileNotFoundError(f"Could not read digit template: {template_path}")
+        templates_for_directory[digit_value] = template_image
+
+    _TMPL_CACHE[dirpath] = templates_for_directory
+    return templates_for_directory
+
 
 
 def _has_upgrade_green(roi_bgr: np.ndarray,
@@ -326,14 +335,13 @@ def segment_digits(bin_img: np.ndarray, tmpls: Dict[str, np.ndarray]) -> Tuple[n
         pad_to_match_template_bbox(right, tmpl_any),
     )
 
-def _match_digit(roi: np.ndarray, cfg: str) -> Tuple[str, float]:
+def _match_digit(roi: np.ndarray, template_path: str) -> Tuple[str, float]:
     """
-    Returns (digits_only, avg_conf). Conf is mean over symbols with non-negative conf,
-    as reported by pytesseract.image_to_data.
+    Returns (digits_only, avg_conf).
     """
 
     H, W = roi.shape[:2]
-    tmpls = load_digit_templates()
+    tmpls = load_digit_templates(Path(template_path))
     best_digit, best_score = -1, -1.0
     for digit, template in tmpls.items():
         score = float(cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)[0][0])
@@ -565,7 +573,7 @@ def read_mana(img: ImgLike) -> Tuple[int, float]:
     roi = _crop(frame_bgr, rect)
     roi = _clean_roi(roi)
 
-    text, conf = _match_digit(roi, TESS_MULTI)
+    text, conf = _match_digit(roi, MANA_DIGIT_TEMPLATES_DIR)
 
     if conf < 20 or not text or not str(text).isdigit():
         return 0, -1.0
@@ -657,9 +665,10 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     roi = _crop(frame_bgr, (rx, ry, rw, rh))
     roi = _clean_roi(roi)
     roi = pad_to_match_template_bbox(roi, TEMPLATE_0)  # keep as-is
-    text, conf = _match_digit(roi, TESS_MULTI)
+    text, conf = _match_digit(roi, ROUND_DIGIT_TEMPLATES_DIR)
 
     round_num = None
+    print("Round conf:", conf)
     if conf > 85:
         round_num = int(text)
 
@@ -672,9 +681,9 @@ def read_round_phase(img: ImgLike) -> Tuple[int, str]:
     res = 255 - mask 
 
     best_phase, best_score = None, -1.0
-    for phase_name, path in (("battle", "assets/templates/battle.png"),
-                             ("deploy", "assets/templates/deploy.png"),
-                             ("prepare", "assets/templates/prepare.png")):
+    for phase_name, path in (("battle", "assets/templates/text/battle.png"),
+                             ("deploy", "assets/templates/text/deploy.png"),
+                             ("prepare", "assets/templates/text/prepare.png")):
         tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if tmpl is None:
             continue
@@ -701,7 +710,7 @@ def is_game_over(img: ImgLike) -> Tuple[bool, bool]:
     mask = cv2.inRange(hsv, (0, 0, 230), (180, 40, 255)) 
     res = 255 - mask
 
-    template = cv2.imread("assets/templates/play_again.png", cv2.IMREAD_GRAYSCALE)
+    template = cv2.imread("assets/templates/text/play_again.png", cv2.IMREAD_GRAYSCALE)
     score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
     if score > 0.6:
         return True, True
@@ -713,7 +722,7 @@ def is_game_over(img: ImgLike) -> Tuple[bool, bool]:
     mask = cv2.inRange(hsv, (0, 0, 230), (180, 40, 255)) 
     res = 255 - mask
 
-    template = cv2.imread("assets/templates/ok.png", cv2.IMREAD_GRAYSCALE)
+    template = cv2.imread("assets/templates/text/ok.png", cv2.IMREAD_GRAYSCALE)
     score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
     return score > 0.6, False
 
@@ -746,7 +755,7 @@ def is_home_screen(img: ImgLike) -> bool:
     mask = cv2.inRange(hsv, (0, 0, 230), (180, 40, 255)) 
     res = 255 - mask
     
-    template = cv2.imread("assets/templates/battle.png", cv2.IMREAD_GRAYSCALE)
+    template = cv2.imread("assets/templates/text/battle.png", cv2.IMREAD_GRAYSCALE)
     score = float(cv2.matchTemplate(res, template, cv2.TM_CCOEFF_NORMED)[0][0])
     return score > 0.6
    
