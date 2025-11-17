@@ -248,7 +248,7 @@ def get_action_mask(game_state: env.GameState, tracker: BoardBenchTracker, recen
     if bench_has_space and affordable_generic:
         mask[BUY_CHEAP_IDX] = True
         mask[BUY_TRAIT_IDX] = True
-    if bench_has_space and affordable_merge:
+    if affordable_merge:
         mask[BUY_MERGE_IDX] = True
     if bench_has_space and affordable_3star_progress:
         mask[BUY_3STAR_IDX] = True
@@ -1336,6 +1336,7 @@ class MergeTacticsEnv:
             + trait_delta_reward
             + board_value_delta_reward
             + buy_reward
+            + deploy_bonus
             + sell_penalty
             + sell_reward
             + pointless_swap_penalty
